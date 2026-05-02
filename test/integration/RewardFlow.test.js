@@ -133,7 +133,7 @@ describe("Integration: Complete Reward Flow", function () {
     // ==================== TRY TO CLAIM (SHOULD FAIL) ====================
     console.log("\nStep 5: Try to claim (should fail - new hold period)");
     const minHoldTime = await rewardVault.minHoldTimeSec();
-    await time.increase(minHoldTime - 200); // Not quite enough time
+    await time.increase(BigInt(minHoldTime) - 200n); // Not quite enough time
     
     await expect(
       rewardVault.connect(user1).claim()
@@ -142,11 +142,11 @@ describe("Integration: Complete Reward Flow", function () {
     
     // ==================== WAIT FULL TIME AND CLAIM ====================
     console.log("\nStep 6: Wait full hold period and claim");
-    await time.increase(300); // Now enough time
-    
+    await time.increase(300n); // Now enough time
+
     await rewardVault.connect(user1).claim();
     console.log("  ✓ Claim successful after full hold period");
-    
+
     console.log("\n=== TEST COMPLETE ===\n");
   });
 
@@ -225,46 +225,60 @@ describe("Integration: Complete Reward Flow", function () {
   });
 
   it("should handle partial sell scenario", async function () {
+    // Design: partial sells do NOT reset the hold timer. lastNonZeroAt only
+    // resets when a wallet's balance fully exits to zero and re-enters from
+    // zero. A partial sell that leaves a non-zero balance preserves the
+    // original entry timestamp, so the user remains eligible to claim once
+    // the hold period elapses (with rewards proportional to remaining
+    // balance). See MMMToken._syncLastNonZero and rewardVault.partialSell.test.
     const { MMM, rewardVault, taxVault, owner, user1 } = await loadFixture(deployFixture);
-    
+
     console.log("\n=== PARTIAL SELL SCENARIO ===\n");
-    
+
     // ==================== BUY ====================
     console.log("Step 1: User buys MMM");
     const buyAmount = ethers.parseUnits("1000", 18);
     await MMM.transfer(user1.address, buyAmount);
-    
+
+    const lnzBefore = await MMM.lastNonZeroAt(user1.address);
+
     // ==================== PARTIAL SELL ====================
     console.log("\nStep 2: User sells 50% of holdings");
     const balance = await MMM.balanceOf(user1.address);
     const sellAmount = balance / 2n;
     await MMM.connect(user1).transfer(owner.address, sellAmount);
-    
+
     const remainingBalance = await MMM.balanceOf(user1.address);
     console.log(`  ✓ Remaining balance: ${ethers.formatUnits(remainingBalance, 18)} MMM`);
     expect(remainingBalance).to.equal(balance - sellAmount);
-    
+
+    // Hold timer must NOT reset on partial sell
+    const lnzAfter = await MMM.lastNonZeroAt(user1.address);
+    expect(lnzAfter).to.equal(lnzBefore);
+
     // ==================== CREATE REWARDS ====================
     console.log("\nStep 3: Create rewards");
     const taxAmount = ethers.parseUnits("10000", 18);
     await MMM.transfer(await taxVault.getAddress(), taxAmount);
     const deadline = Math.floor(Date.now() / 1000) + 600;
     await taxVault.process(taxAmount, 0, deadline);
-    
+
     const pending = await rewardVault.pending(user1.address);
     console.log(`  ✓ Pending rewards: ${ethers.formatUnits(pending, 18)} MMM`);
-    
-    // ==================== TRY TO CLAIM ====================
-    console.log("\nStep 4: Try to claim (should fail - hold reset)");
+    expect(pending).to.be.gt(0);
+
+    // ==================== CLAIM AFTER HOLD ====================
+    console.log("\nStep 4: Claim after hold period (should succeed)");
     const minHoldTime = await rewardVault.minHoldTimeSec();
     await time.increase(minHoldTime);
-    
-    // Should fail because partial sell resets hold timer
-    await expect(
-      rewardVault.connect(user1).claim()
-    ).to.be.reverted;
-    console.log("  ✓ Claim correctly blocked after partial sell");
-    
+
+    const balBefore = await MMM.balanceOf(user1.address);
+    await rewardVault.connect(user1).claim();
+    const balAfter = await MMM.balanceOf(user1.address);
+
+    expect(balAfter).to.be.gt(balBefore);
+    console.log("  ✓ Claim succeeded; partial sell preserved hold eligibility");
+
     console.log("\n=== TEST COMPLETE ===\n");
   });
 });
