@@ -119,21 +119,7 @@ async function coreFixture() {
   await mmm.connect(owner).launch();
 
   /* -----------------------------------------
-     7. Deploy SwapVault
-  ----------------------------------------- */
-
-  const SwapVault = await ethers.getContractFactory("SwapVault");
-
-  const swapVault = await SwapVault.deploy(
-    await mmm.getAddress(),
-    await wmon.getAddress(),
-    owner.address
-  );
-
-  await swapVault.waitForDeployment();
-
-  /* -----------------------------------------
-     8. Deploy Marketing + Team Vaults
+     7. Deploy Marketing + Team Vaults
   ----------------------------------------- */
 
   const MarketingVault = await ethers.getContractFactory("MarketingVault");
@@ -154,18 +140,17 @@ async function coreFixture() {
   await teamVestingVault.waitForDeployment();
 
   /* -----------------------------------------
-     9. Wire TaxVault
+     8. Wire TaxVault
   ----------------------------------------- */
 
   await taxVault.connect(owner).wireOnce(
     await rewardVault.getAddress(),
-    await swapVault.getAddress(),
     await marketingVault.getAddress(),
     await teamVestingVault.getAddress()
   );
 
   /* -----------------------------------------
-     10. Configure Router
+     9. Configure Router
   ----------------------------------------- */
 
   await taxVault.connect(owner).setRouter(await mockRouter.getAddress());
@@ -187,7 +172,6 @@ async function coreFixture() {
     taxVault,
     marketingVault,
     teamVestingVault,
-    swapVault,
     mockRouter,
     minHoldTime,
     cooldown,
