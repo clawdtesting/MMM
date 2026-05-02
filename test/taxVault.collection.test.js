@@ -10,7 +10,7 @@ describe("TaxVault - Sell Tax Collection", function () {
     const {
       owner,
       user1,
-      user2,     // mock pair
+      pair,
       mmm,
       taxVault
     } = await loadFixture(coreFixture);
@@ -21,8 +21,8 @@ describe("TaxVault - Sell Tax Collection", function () {
 
     const beforeTaxVault = await mmm.balanceOf(await taxVault.getAddress());
 
-    // Sell: transfer to pair (user2)
-    await mmm.connect(user1).transfer(user2.address, amount);
+    // Sell: transfer to pair
+    await mmm.connect(user1).transfer(pair.address, amount);
 
     const afterTaxVault = await mmm.balanceOf(await taxVault.getAddress());
 

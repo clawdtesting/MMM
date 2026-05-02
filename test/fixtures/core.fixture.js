@@ -1,7 +1,10 @@
 const { ethers } = require("hardhat");
 
 async function coreFixture() {
-  const [owner, user1, user2] = await ethers.getSigners();
+  // `pair` is a dedicated signer used as the AMM pair address so that
+  // transfers between owner/user1/user2 are not misclassified as buy/sell
+  // and thus do not get taxed in unit tests that expect tax-free movement.
+  const [owner, user1, user2, pair] = await ethers.getSigners();
 
   /* -----------------------------------------
      1. Deploy MMM
@@ -111,7 +114,7 @@ async function coreFixture() {
     await taxVault.getAddress()
   );
 
-  await mmm.connect(owner).setPair(user2.address);
+  await mmm.connect(owner).setPair(pair.address);
   await mmm.connect(owner).setTaxExempt(owner.address, false);
   await mmm.connect(owner).launch();
 
@@ -176,6 +179,7 @@ async function coreFixture() {
     owner,
     user1,
     user2,
+    pair,
     mmm,
     usdc,
     wmon,
