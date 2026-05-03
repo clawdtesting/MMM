@@ -165,18 +165,56 @@ contract MMMToken is ERC20, Ownable {
 
     /*//////////////////////////////////////////////////////////////
                         LAST NON ZERO TRACKING
+
+        Balance-weighted entry timestamp ("WAT") closes the
+        dust-primer attack from issues.txt #6: priming a wallet with
+        1 wei used to satisfy minHoldTime forever, even after a real
+        position was moved in later. Now every NEW receipt pulls the
+        timestamp toward `now` proportional to its size:
+
+            newTs = (prevBal * prevTs + receivedAmount * now) / newBal
+
+        Tiny dust receipts barely shift the timestamp; a real
+        position snaps it close to `now`, forcing a fresh hold.
+        Sender-side resets only happen on a full exit so partial
+        sells continue to preserve hold-time eligibility.
     //////////////////////////////////////////////////////////////*/
 
-    function _syncLastNonZero(address a) internal {
+    function _onSendUpdate(address a) internal {
+        if (a == address(0)) return;
+        // Only reset on full exit. Partial sells keep their entry stamp.
+        if (balanceOf(a) == 0) {
+            lastNonZeroAt[a] = 0;
+        }
+    }
+
+    function _onReceiveUpdate(address a, uint256 amountReceived) internal {
         if (a == address(0)) return;
 
         uint256 bal = balanceOf(a);
 
         if (bal == 0) {
+            // Zero-amount receive into an empty wallet (no-op transfer).
             lastNonZeroAt[a] = 0;
-        } else if (lastNonZeroAt[a] == 0) {
-            lastNonZeroAt[a] = block.timestamp;
+            return;
         }
+
+        if (amountReceived == 0) return;
+
+        uint256 prevBal = bal - amountReceived;
+        uint256 prevTs  = lastNonZeroAt[a];
+
+        // First entry, or re-entry after a previous full exit:
+        // start the clock fresh from now.
+        if (prevBal == 0 || prevTs == 0) {
+            lastNonZeroAt[a] = block.timestamp;
+            return;
+        }
+
+        // Balance-weighted average. With current 1B-supply tokens and
+        // unix timestamps both fit in uint256 with massive headroom.
+        lastNonZeroAt[a] =
+            (prevBal * prevTs + amountReceived * block.timestamp) / bal;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -201,8 +239,8 @@ contract MMMToken is ERC20, Ownable {
         // Mint / Burn
         if (from == address(0) || to == address(0)) {
             super._update(from, to, amount);
-            _syncLastNonZero(from);
-            _syncLastNonZero(to);
+            _onSendUpdate(from);
+            _onReceiveUpdate(to, amount);
             return;
         }
 
@@ -226,8 +264,8 @@ contract MMMToken is ERC20, Ownable {
 
         if (!takeTax) {
             super._update(from, to, amount);
-            _syncLastNonZero(from);
-            _syncLastNonZero(to);
+            _onSendUpdate(from);
+            _onReceiveUpdate(to, amount);
             return;
         }
 
@@ -237,8 +275,8 @@ contract MMMToken is ERC20, Ownable {
 
         if (taxBps == 0) {
             super._update(from, to, amount);
-            _syncLastNonZero(from);
-            _syncLastNonZero(to);
+            _onSendUpdate(from);
+            _onReceiveUpdate(to, amount);
             return;
         }
 
@@ -255,8 +293,11 @@ contract MMMToken is ERC20, Ownable {
             // 2️⃣ Buyer pays tax to vault
             super._update(to, taxVault, tax);
 
-            _syncLastNonZero(to);
-            _syncLastNonZero(taxVault);
+            // Buyer's NET receipt is amount - tax. Sync the WAT against
+            // that net so a buy doesn't double-credit the buyer.
+            _onSendUpdate(from);
+            _onReceiveUpdate(to, amount - tax);
+            _onReceiveUpdate(taxVault, tax);
             return;
         }
 
@@ -270,14 +311,15 @@ contract MMMToken is ERC20, Ownable {
             // Net goes to pair
             super._update(from, to, amount - tax);
 
-            _syncLastNonZero(from);
-            _syncLastNonZero(taxVault);
+            _onSendUpdate(from);
+            _onReceiveUpdate(taxVault, tax);
+            _onReceiveUpdate(to, amount - tax);
             return;
         }
 
         // Fallback (should never hit for AMM)
         super._update(from, to, amount);
-        _syncLastNonZero(from);
-        _syncLastNonZero(to);
+        _onSendUpdate(from);
+        _onReceiveUpdate(to, amount);
     }
 }
