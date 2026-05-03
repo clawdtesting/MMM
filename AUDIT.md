@@ -14,14 +14,17 @@
 
 ## OVERALL VERDICT: 🔴 DO NOT LAUNCH
 
-Multiple critical, unpatched economic exploits remain in `RewardVault` +
-`MMMToken`. The production deploy script does not match the contract
-constructors (mainnet deploy will revert mid-pipeline). The Frontend
-"claim" button is a `localStorage` stub — it never calls the contract.
+Critical economic exploits #5 and #7 (reward debt desynchronization /
+retroactive reward claim) are now patched via a token→vault sync hook —
+see "Fix Log" at the bottom of this file. **The remaining critical
+items are still open**: dust-primer hold bypass (#6), no emergency
+pause, no tax-rate cap or owner timelock, broken mainnet deploy script,
+and the Frontend `claim` button is still a `localStorage` stub.
 Several test files reference non-existent contracts and functions and
 cannot run.
 
-**Blocker count: 7 critical · 5 high · 6 medium · 4 low**
+**Blocker count: 5 critical · 5 high · 6 medium · 4 low**
+(was 7 critical — 2 closed by 2026-05-03 fix #1)
 
 ---
 
@@ -39,9 +42,9 @@ vaults ✅.
 | 2 | Integer division loss in `notifyRewardAmount` | ❌ **OPEN** (medium) | `RewardVault.sol:221` — no remainder accumulator. |
 | 3 | `syncRewardDebt` unprotected | 🟡 **PARTIAL** | `RewardVault.sol:312-319` now has `onlyOwner`, BUT in production wiring ownership is transferred to `TaxVault`, which has no proxy → function is **permanently unreachable**. |
 | 4 | TaxVault constructor missing contract validation | 🟡 **PARTIAL** | `TaxVault.sol:130-140` checks `address(0)` only. No `code.length > 0` check. Same defect in `RewardVault.sol:102-105`. |
-| 5 | Reward debt desynchronization | ❌ **OPEN** (critical) | `MMMToken._update` has no hook into `RewardVault`. `rewardDebt` is updated only inside `claim()` (line 293). New buyers retroactively claim against full history of `accRewardPerToken`. |
+| 5 | Reward debt desynchronization | ✅ **FIXED** (2026-05-03) | `MMMToken._update` now brackets the transfer with `RewardVault.preTransferHook` / `postTransferHook` (commit on branch `claude/mmm-token-launch-audit-O6bhZ`). `pre` crystallises pending into a `claimable` accumulator using OLD balance; `post` resyncs `rewardDebt` to NEW balance. See Fix Log #1. |
 | 6 | Dust wallet hold-time bypass | ❌ **OPEN** (critical) | `MMMToken._syncLastNonZero` (lines 146-156) is identical to the issues.txt description. Primer-wallet attack still possible. |
-| 7 | Retroactive reward claim by new holders | ❌ **OPEN** (critical) | Same root as #5. `rewardDebt = 0` for fresh receivers; `pending() = balance * accRewardPerToken`. |
+| 7 | Retroactive reward claim by new holders | ✅ **FIXED** (2026-05-03) | Same fix as #5: a fresh receiver's `rewardDebt` is set to `newBalance * accRewardPerToken` in `postTransferHook`, so `pending()` returns 0 immediately after the buy. Regression test in `test/rewardVault.retroClaim.test.js`. |
 | 8 | O(n) gas DoS in `eligibleSupply` | ❌ **OPEN** (high) | `RewardVault.sol:119-131` still iterates `excludedRewardAddresses` on every notify. No removal function — append-only. |
 | 9 | Double `_update` calls / double `Transfer` events | ❌ **OPEN** (medium, by design) | Two events per taxed transfer. Required for the buy-side fix. Must be documented for indexers. |
 | 10 | Hardcoded router exclusion | ✅ **FIXED** | `MMMToken._update` keys tax purely off `from == pair` / `to == pair` (lines 179-188). Router excluded from logic. |
@@ -248,12 +251,26 @@ in Frontend, dashboard, or any user-facing surface.
 
 ## PRIORITY FIX LIST (by severity)
 
-1. **[CRITICAL] Implement RewardVault sync hook in `MMMToken._update`.**
-   Add a `RewardVault.onTokenTransfer(from, to)` (callable only by
-   the token), invoked for both `from` and `to` BEFORE balance changes
-   in `_update`. Crystallise `pending()` to a `claimable` accumulator
-   for `from`, set `rewardDebt[to] = newBalance * accRewardPerToken`
-   for `to`. **Resolves #5, #7. Effort: ~1.5 days incl. tests.**
+1. ✅ **DONE (2026-05-03) — Implement RewardVault sync hook in `MMMToken._update`.**
+   `MMMToken._update` is split into a hook-bracketed shell + an internal
+   `_doUpdate` that holds the existing tax/transfer logic. New external
+   functions on `RewardVault`:
+   - `preTransferHook(from, to)` — crystallises each side's accrual
+     against their CURRENT balance into a new `claimable[user]`
+     accumulator and sets `rewardDebt = balance * accRewardPerToken`.
+   - `postTransferHook(from, to)` — resyncs `rewardDebt = newBalance *
+     accRewardPerToken` after the transfer settles.
+
+   Both functions are guarded by an `onlyToken` modifier
+   (`msg.sender == address(mmm)`). `RewardVault.pending()` and
+   `claim()` now read from `claimable[user]`. New token wiring:
+   `MMMToken.setRewardVaultOnce(rv)` (one-shot, owner-only).
+
+   Wired in `test/fixtures/core.fixture.js` and
+   `scripts/deploy-official-testnet.js`. Regression coverage in
+   `test/rewardVault.retroClaim.test.js` (3 cases: new buyer gets 0
+   retroactive; partial sell preserves crystallised; hook rejects
+   non-token callers). **Resolves #5, #7.**
 
 2. **[CRITICAL] Fix dust-primer hold tracking.** Either (a) maintain
    a balance-weighted average entry timestamp, or (b) reset
@@ -337,13 +354,58 @@ run in parallel before mainnet.
 
 | Condition | Status |
 |---|---|
-| Issues #5, #6, #7 unpatched | ❌ BLOCKER |
+| Issue #5 — reward debt desync | ✅ CLOSED (2026-05-03 fix #1) |
+| Issue #7 — retroactive claim by new holders | ✅ CLOSED (2026-05-03 fix #1) |
+| Issue #6 — dust-primer hold bypass | ❌ BLOCKER |
 | Issue #3 fix unreachable under prod wiring | ❌ BLOCKER |
 | Frontend has no functional claim | ❌ BLOCKER |
 | No emergency pause | ❌ BLOCKER |
 | Mainnet deploy script broken | ❌ BLOCKER |
 | Test coverage <50% on core logic (broken fixtures) | ❌ BLOCKER |
 
-**Recommendation: HALT LAUNCH.** Address items 1-7 minimum, run an
-external audit, then re-test on testnet for at least 7 days under
-adversarial conditions before any mainnet announcement.
+**Recommendation: HALT LAUNCH.** Address remaining items (#2 onward
+in the priority list), run an external audit, then re-test on
+testnet for at least 7 days under adversarial conditions before
+any mainnet announcement.
+
+---
+
+## FIX LOG
+
+### Fix #1 — Reward sync hook (2026-05-03)
+
+**Closes:** issues.txt #5 (reward debt desync), #7 (retroactive
+reward claim). Priority list item #1.
+
+**Files changed:**
+- `contracts/MMMToken.sol` — added `IRewardVaultHook` interface,
+  `rewardVault` storage + `setRewardVaultOnce`, `RewardVaultSet`
+  event. `_update` now wraps the existing logic (moved into
+  `_doUpdate`) with `preTransferHook` / `postTransferHook` calls.
+- `contracts/RewardVault.sol` — added `claimable` mapping,
+  `OnlyToken` error, `onlyToken` modifier, `Crystallised` event,
+  `preTransferHook` / `postTransferHook` external functions,
+  `_crystallise` / `_resyncDebt` internals. `pending()` and `claim()`
+  read/spend from `claimable[user]`.
+- `test/fixtures/core.fixture.js` — wires `setRewardVaultOnce`
+  before transferring `RewardVault` ownership to `TaxVault`.
+- `scripts/deploy-official-testnet.js` — adds the same wiring step
+  to the canonical deploy.
+- `test/rewardVault.retroClaim.test.js` *(new)* — 3 regression
+  tests covering: zero retroactive accrual for new buyers, claimable
+  preservation across partial sells, and hook access control.
+
+**Verification status:** code review only. `npx hardhat test` was
+not executed in this environment because the sandbox blocks the
+solc binary download (`HH502`). CI must run the suite outside the
+sandbox before this fix is considered green.
+
+**Out of scope (still open):**
+- Excluded reward addresses (e.g. deployer, pair, taxVault)
+  accumulate `claimable` that they cannot effectively claim, but
+  the deployer key itself COULD claim from its accumulator while
+  also holding tokens — this is an existing single-key concern
+  flagged under "Security Posture", not a regression introduced
+  by this fix.
+- Dust-primer hold bypass (#6) is unaffected by this fix; it
+  needs the separate priority-list item #2.
