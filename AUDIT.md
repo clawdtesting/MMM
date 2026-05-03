@@ -14,17 +14,18 @@
 
 ## OVERALL VERDICT: 🔴 DO NOT LAUNCH
 
-Critical economic exploits #5 and #7 (reward debt desynchronization /
-retroactive reward claim) are now patched via a token→vault sync hook —
-see "Fix Log" at the bottom of this file. **The remaining critical
-items are still open**: dust-primer hold bypass (#6), no emergency
-pause, no tax-rate cap or owner timelock, broken mainnet deploy script,
-and the Frontend `claim` button is still a `localStorage` stub.
-Several test files reference non-existent contracts and functions and
-cannot run.
+Critical economic exploits #5, #6 and #7 are now patched —
+reward-debt desync and retroactive claim closed by fix #1
+(token↔vault sync hook), dust-primer hold bypass closed by fix #2
+(balance-weighted entry timestamp). See "Fix Log" at the bottom of
+this file. **The remaining critical items are still open**: no
+emergency pause, no tax-rate cap or owner timelock, broken mainnet
+deploy script, and the Frontend `claim` button is still a
+`localStorage` stub. Several test files reference non-existent
+contracts and functions and cannot run.
 
-**Blocker count: 5 critical · 5 high · 6 medium · 4 low**
-(was 7 critical — 2 closed by 2026-05-03 fix #1)
+**Blocker count: 4 critical · 5 high · 6 medium · 4 low**
+(was 7 critical — 3 closed by the 2026-05-03 fix series)
 
 ---
 
@@ -43,7 +44,7 @@ vaults ✅.
 | 3 | `syncRewardDebt` unprotected | 🟡 **PARTIAL** | `RewardVault.sol:312-319` now has `onlyOwner`, BUT in production wiring ownership is transferred to `TaxVault`, which has no proxy → function is **permanently unreachable**. |
 | 4 | TaxVault constructor missing contract validation | 🟡 **PARTIAL** | `TaxVault.sol:130-140` checks `address(0)` only. No `code.length > 0` check. Same defect in `RewardVault.sol:102-105`. |
 | 5 | Reward debt desynchronization | ✅ **FIXED** (2026-05-03) | `MMMToken._update` now brackets the transfer with `RewardVault.preTransferHook` / `postTransferHook` (commit on branch `claude/mmm-token-launch-audit-O6bhZ`). `pre` crystallises pending into a `claimable` accumulator using OLD balance; `post` resyncs `rewardDebt` to NEW balance. See Fix Log #1. |
-| 6 | Dust wallet hold-time bypass | ❌ **OPEN** (critical) | `MMMToken._syncLastNonZero` (lines 146-156) is identical to the issues.txt description. Primer-wallet attack still possible. |
+| 6 | Dust wallet hold-time bypass | ✅ **FIXED** (2026-05-03) | `_syncLastNonZero` removed; receivers now go through `_onReceiveUpdate` which applies a balance-weighted average timestamp `(prevBal*prevTs + amount*now) / newBal`. A 1-wei primer followed by 1M MMM snaps the clock to ≈ `now`. Senders only reset on a full exit so partial-sell behaviour is preserved. Regression tests in `test/mmmToken.dustPrimer.test.js`. See Fix Log #2. |
 | 7 | Retroactive reward claim by new holders | ✅ **FIXED** (2026-05-03) | Same fix as #5: a fresh receiver's `rewardDebt` is set to `newBalance * accRewardPerToken` in `postTransferHook`, so `pending()` returns 0 immediately after the buy. Regression test in `test/rewardVault.retroClaim.test.js`. |
 | 8 | O(n) gas DoS in `eligibleSupply` | ❌ **OPEN** (high) | `RewardVault.sol:119-131` still iterates `excludedRewardAddresses` on every notify. No removal function — append-only. |
 | 9 | Double `_update` calls / double `Transfer` events | ❌ **OPEN** (medium, by design) | Two events per taxed transfer. Required for the buy-side fix. Must be documented for indexers. |
@@ -272,10 +273,27 @@ in Frontend, dashboard, or any user-facing surface.
    retroactive; partial sell preserves crystallised; hook rejects
    non-token callers). **Resolves #5, #7.**
 
-2. **[CRITICAL] Fix dust-primer hold tracking.** Either (a) maintain
-   a balance-weighted average entry timestamp, or (b) reset
-   `lastNonZeroAt` whenever balance increases by more than X% of
-   prior balance. **Resolves #6. Effort: ~2 days incl. tests.**
+2. ✅ **DONE (2026-05-03) — Fix dust-primer hold tracking.**
+   `MMMToken` replaces `_syncLastNonZero` with two helpers:
+   `_onSendUpdate(addr)` resets `lastNonZeroAt` only on full exit
+   (preserving the partial-sell semantic), and
+   `_onReceiveUpdate(addr, amountReceived)` advances
+   `lastNonZeroAt` using a balance-weighted average:
+
+       newTs = (prevBal * prevTs + amountReceived * now) / newBal
+
+   Tiny dust top-ups round to a no-op via integer division; a real
+   position snaps the clock to ≈ `now`, so the attacker has to wait
+   the full hold window against the size that actually claims.
+
+   All `_doUpdate` paths (mint/burn, no-tax transfer, taxBps==0,
+   buy, sell, fallback) wired through the new helpers. Buy uses
+   the buyer's NET receipt (`amount - tax`) so a buyer is not
+   double-credited. Regression coverage in
+   `test/mmmToken.dustPrimer.test.js` (5 cases: dust+real snaps to
+   now, claim is blocked then permitted after the new hold,
+   tiny top-ups are no-ops, partial sell preserves the stamp,
+   full exit + re-entry resets cleanly). **Resolves #6.**
 
 3. **[CRITICAL] Add `Pausable` to `MMMToken`** with a separate
    `guardian` role that can ONLY pause (cannot move funds, cannot
@@ -356,7 +374,7 @@ run in parallel before mainnet.
 |---|---|
 | Issue #5 — reward debt desync | ✅ CLOSED (2026-05-03 fix #1) |
 | Issue #7 — retroactive claim by new holders | ✅ CLOSED (2026-05-03 fix #1) |
-| Issue #6 — dust-primer hold bypass | ❌ BLOCKER |
+| Issue #6 — dust-primer hold bypass | ✅ CLOSED (2026-05-03 fix #2) |
 | Issue #3 fix unreachable under prod wiring | ❌ BLOCKER |
 | Frontend has no functional claim | ❌ BLOCKER |
 | No emergency pause | ❌ BLOCKER |
@@ -409,3 +427,41 @@ sandbox before this fix is considered green.
   by this fix.
 - Dust-primer hold bypass (#6) is unaffected by this fix; it
   needs the separate priority-list item #2.
+
+### Fix #2 — Balance-weighted hold-time tracking (2026-05-03)
+
+**Closes:** issues.txt #6 (dust wallet hold-time bypass).
+Priority list item #2.
+
+**Files changed:**
+- `contracts/MMMToken.sol` — removed `_syncLastNonZero`; added
+  `_onSendUpdate(addr)` and `_onReceiveUpdate(addr, amountReceived)`.
+  Receiver hook applies the weighted average
+  `(prevBal*prevTs + amountReceived*now) / newBal`. Sender hook
+  only resets on full exit. All five `_doUpdate` branches
+  (mint/burn, no-tax, taxBps==0, buy, sell, fallback) updated to
+  use the new hooks. Buy path syncs the buyer's NET receipt
+  (`amount - tax`) so a buy doesn't double-credit. Mint path now
+  calls `_onReceiveUpdate(to, amount)` instead of zero-amount
+  sync, so the constructor mint correctly stamps the owner with
+  `block.timestamp` and matches the existing constructor fast-path.
+- `test/mmmToken.dustPrimer.test.js` *(new)* — 5 regression cases:
+  dust + real receipt snaps WAT to ≈ `now`; immediate claim is
+  blocked, but works after the full hold from the real buy;
+  1-wei top-ups round to a no-op for an existing 1M holder;
+  partial sell preserves the stamp; full exit + re-entry sets a
+  later stamp.
+
+**Verification status:** code review only (sandbox blocks the
+solc download — `HH502`). CI must run `npx hardhat test` outside
+the sandbox.
+
+**Out of scope (still open):**
+- The WAT scheme means a top-up that is large relative to the
+  existing position can extend hold meaningfully — by design.
+  Documentation for end-users should explain that buying more
+  pushes the hold clock proportionally.
+- Stake-weighted **claim sizing** (rewarding longer holders
+  more per-token) is not implemented; this fix only blocks the
+  dust-primer attack. If the team wants tier-based rewards, that
+  is a separate design item.
