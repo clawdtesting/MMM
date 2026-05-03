@@ -101,10 +101,18 @@ async function coreFixture() {
 
 
   // Transfer RewardVault ownership to TaxVault
+  // Wire the reward sync hook BEFORE we transfer ownership of the
+  // RewardVault to TaxVault. Once wired, every MMMToken._update will
+  // call preTransferHook + postTransferHook on RewardVault, keeping
+  // rewardDebt in sync with each user's balance (fixes issues #5/#7).
+  await mmm.connect(owner).setRewardVaultOnce(
+    await rewardVault.getAddress()
+  );
+
   await rewardVault.connect(owner).transferOwnership(
       await taxVault.getAddress()
     );
-  
+
 
   /* -----------------------------------------
      6. Configure MMM for Tax

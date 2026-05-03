@@ -4,6 +4,11 @@ pragma solidity ^0.8.24;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+interface IRewardVaultHook {
+    function preTransferHook(address from, address to) external;
+    function postTransferHook(address from, address to) external;
+}
+
 contract MMMToken is ERC20, Ownable {
 
     /*//////////////////////////////////////////////////////////////
@@ -12,6 +17,7 @@ contract MMMToken is ERC20, Ownable {
 
     error ZeroAddress();
     error TaxVaultAlreadySet();
+    error RewardVaultAlreadySet();
     error AlreadyLaunched();
     error TradingNotEnabled();
 
@@ -23,6 +29,9 @@ contract MMMToken is ERC20, Ownable {
 
     address public taxVault;
     bool public taxVaultSetOnce;
+
+    address public rewardVault;
+    bool public rewardVaultSetOnce;
 
     address public pair;
     address public router;
@@ -41,6 +50,7 @@ contract MMMToken is ERC20, Ownable {
     event Launch(uint256 timestamp);
     event TradingEnabled();
     event TaxVaultSet(address indexed vault);
+    event RewardVaultSet(address indexed vault);
     event PairSet(address indexed pair);
     event RouterSet(address indexed router);
     event TaxExemptSet(address indexed who, bool exempt);
@@ -80,6 +90,20 @@ contract MMMToken is ERC20, Ownable {
         taxVaultSetOnce = true;
 
         emit TaxVaultSet(vault);
+    }
+
+    /// @notice One-time wiring of the RewardVault. Once set, MMMToken will
+    /// invoke the reward sync hooks on every transfer to keep rewardDebt
+    /// in sync with each user's balance — preventing retroactive reward
+    /// claims by new buyers (issues.txt #5 and #7).
+    function setRewardVaultOnce(address vault) external onlyOwner {
+        if (rewardVaultSetOnce) revert RewardVaultAlreadySet();
+        if (vault == address(0)) revert ZeroAddress();
+
+        rewardVault = vault;
+        rewardVaultSetOnce = true;
+
+        emit RewardVaultSet(vault);
     }
 
     function setPair(address pair_) external onlyOwner {
@@ -160,6 +184,19 @@ contract MMMToken is ERC20, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     function _update(address from, address to, uint256 amount) internal override {
+        address rv = rewardVault;
+        if (rv != address(0)) {
+            IRewardVaultHook(rv).preTransferHook(from, to);
+        }
+
+        _doUpdate(from, to, amount);
+
+        if (rv != address(0)) {
+            IRewardVaultHook(rv).postTransferHook(from, to);
+        }
+    }
+
+    function _doUpdate(address from, address to, uint256 amount) internal {
 
         // Mint / Burn
         if (from == address(0) || to == address(0)) {
