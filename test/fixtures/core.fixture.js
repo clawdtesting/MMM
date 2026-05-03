@@ -114,6 +114,10 @@ async function coreFixture() {
     await taxVault.getAddress()
   );
 
+  await mmm.connect(owner).setRewardVaultOnce(
+    await rewardVault.getAddress()
+  );
+
   await mmm.connect(owner).setPair(pair.address);
   await mmm.connect(owner).setTaxExempt(owner.address, false);
   await mmm.connect(owner).launch();
@@ -148,6 +152,13 @@ async function coreFixture() {
     await marketingVault.getAddress(),
     await teamVestingVault.getAddress()
   );
+
+  // Exclude protocol-internal addresses from reward accrual so they never
+  // accumulate dead `creditedRewards` while moving MMM around.
+  const DEAD = "0x000000000000000000000000000000000000dEaD";
+  await taxVault.connect(owner).excludeFromRewards(await taxVault.getAddress());
+  await taxVault.connect(owner).excludeFromRewards(pair.address);
+  await taxVault.connect(owner).excludeFromRewards(DEAD);
 
   /* -----------------------------------------
      9. Configure Router
