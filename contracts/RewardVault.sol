@@ -51,7 +51,7 @@ contract RewardVault is Ownable, ReentrancyGuard {
     error ZeroAmount();
     error EligibleSupplyZero();
     error ZeroAddress();
-    error OnlyToken();
+    error NotAuthorized();
 
     uint256 public constant ACC_SCALE = 1e18;
 
@@ -74,16 +74,20 @@ contract RewardVault is Ownable, ReentrancyGuard {
     mapping(address => uint256) public rewardDebt;
     mapping(address => uint48)  public lastClaimAt;
 
-    // Crystallised, unclaimed rewards. Captured on every token transfer via
-    // the pre/post hooks below so new buyers cannot retro-claim against the
-    // historical accRewardPerToken (issues.txt #5 and #7).
-    mapping(address => uint256) public claimable;
+    // Rewards captured on each transfer hook for the FROM/TO address,
+    // representing accruals earned at the pre-transfer balance. These are
+    // paid out alongside the live `pending()` on claim. Prevents new
+    // holders from claiming retroactively and snipers from draining the
+    // pool with a big buy + immediate claim.
+    mapping(address => uint256) public creditedRewards;
 
     /*//////////////////////////////////////////////////////////////
                         SUPPLY EXCLUSION
     //////////////////////////////////////////////////////////////*/
 
     address[] public excludedRewardAddresses;
+    // O(1) mirror of excludedRewardAddresses for hot-path checks.
+    mapping(address => bool) public isExcludedFromRewards;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -92,16 +96,7 @@ contract RewardVault is Ownable, ReentrancyGuard {
     event BoostNFTSet(address indexed boostNFT);
     event Notified(uint256 amount, uint256 eligibleSupply, uint256 newAcc);
     event Claimed(address indexed user, uint256 amount);
-    event Crystallised(address indexed user, uint256 added, uint256 totalClaimable);
-
-    /*//////////////////////////////////////////////////////////////
-                            MODIFIERS
-    //////////////////////////////////////////////////////////////*/
-
-    modifier onlyToken() {
-        if (msg.sender != address(mmm)) revert OnlyToken();
-        _;
-    }
+    event Credited(address indexed user, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -126,6 +121,7 @@ contract RewardVault is Ownable, ReentrancyGuard {
 
         // Exclude vault itself
         excludedRewardAddresses.push(address(this));
+        isExcludedFromRewards[address(this)] = true;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -159,6 +155,15 @@ contract RewardVault is Ownable, ReentrancyGuard {
             accrued > debt ? accrued - debt : 0;
 
         return claimable[user] + unclaimedFromCurrent;
+    }
+
+    /// Total claimable: live `pending()` plus credit captured by transfer
+    /// hooks. The latter is paid out regardless of current balance vs
+    /// minBalance, so users who genuinely earned rewards on a held
+    /// position keep them even after a partial sell that drops below the
+    /// minimum (subject to the standard claim() preconditions).
+    function claimable(address user) public view returns (uint256) {
+        return pending(user) + creditedRewards[user];
     }
 
     function holdRemaining(address user) external view returns (uint256) {
@@ -222,7 +227,10 @@ contract RewardVault is Ownable, ReentrancyGuard {
     }
 
     function addExcludedRewardAddress(address a) external onlyOwner {
+        if (a == address(0)) revert ZeroAddress();
+        if (isExcludedFromRewards[a]) return;
         excludedRewardAddresses.push(a);
+        isExcludedFromRewards[a] = true;
     }
 
     function notifyRewardAmount(uint256 amount)
@@ -239,6 +247,58 @@ contract RewardVault is Ownable, ReentrancyGuard {
         totalDistributed  += amount;
 
         emit Notified(amount, denom, accRewardPerToken);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TRANSFER HOOK (called by MMM)
+
+       MMMToken._update calls this BEFORE each underlying super._update,
+       so balanceOf(user) here is the PRE-transfer balance. We capture
+       the rewards earned at the old balance into creditedRewards and
+       reset rewardDebt to the new balance, so future emissions accrue
+       only against the new balance. This kills both retroactive
+       claiming for new holders and the snipe-then-claim attack.
+    //////////////////////////////////////////////////////////////*/
+
+    function syncOnTransfer(address from, address to, uint256 amount)
+        external
+    {
+        if (msg.sender != address(mmm)) revert NotAuthorized();
+        // Self-transfers leave balances unchanged; nothing to settle.
+        if (amount == 0 || from == to) return;
+
+        if (from != address(0)) {
+            uint256 oldBal = mmm.balanceOf(from);
+            uint256 newBal = oldBal > amount ? oldBal - amount : 0;
+            _settle(from, oldBal, newBal);
+        }
+        if (to != address(0)) {
+            uint256 oldBal = mmm.balanceOf(to);
+            uint256 newBal = oldBal + amount;
+            _settle(to, oldBal, newBal);
+        }
+    }
+
+    function _settle(address user, uint256 oldBal, uint256 newBal) internal {
+        if (isExcludedFromRewards[user]) return;
+
+        // Credit rewards earned at the OLD balance, but only if the user
+        // was at or above the participation minimum. This mirrors the
+        // pending() semantics so a holder doesn't accidentally credit
+        // anything from a sub-min position.
+        if (oldBal >= minBalance) {
+            uint256 accrued = (oldBal * accRewardPerToken) / ACC_SCALE;
+            uint256 debt = rewardDebt[user];
+            if (accrued > debt) {
+                uint256 delta = accrued - debt;
+                creditedRewards[user] += delta;
+                emit Credited(user, delta);
+            }
+        }
+
+        // Reset debt to the post-transfer balance so subsequent
+        // accRewardPerToken increases accrue against the new position.
+        rewardDebt[user] = (newBal * accRewardPerToken) / ACC_SCALE;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -304,17 +364,17 @@ contract RewardVault is Ownable, ReentrancyGuard {
 
         /* ---------- PAYOUT ---------- */
 
-        // Flush latest accrual (against current balance) into claimable.
-        // Done after gates so a doomed call doesn't write state.
-        _crystallise(user);
-
-        claimed = claimable[user];
+        uint256 livePending = pending(user);
+        uint256 credit = creditedRewards[user];
+        claimed = livePending + credit;
         if (claimed == 0) revert NothingToClaim();
 
         // Zero the accumulator. rewardDebt was already set to bal*acc by
         // _crystallise above, so any further accrual against the user's
         // current balance starts cleanly.
         claimable[user] = 0;
+
+        if (credit > 0) creditedRewards[user] = 0;
 
         lastClaimAt[user] = uint48(nowTs);
 

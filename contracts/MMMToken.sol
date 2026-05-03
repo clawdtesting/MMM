@@ -5,8 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 interface IRewardVaultHook {
-    function preTransferHook(address from, address to) external;
-    function postTransferHook(address from, address to) external;
+    function syncOnTransfer(address from, address to, uint256 amount) external;
 }
 
 contract MMMToken is ERC20, Ownable {
@@ -92,10 +91,6 @@ contract MMMToken is ERC20, Ownable {
         emit TaxVaultSet(vault);
     }
 
-    /// @notice One-time wiring of the RewardVault. Once set, MMMToken will
-    /// invoke the reward sync hooks on every transfer to keep rewardDebt
-    /// in sync with each user's balance — preventing retroactive reward
-    /// claims by new buyers (issues.txt #5 and #7).
     function setRewardVaultOnce(address vault) external onlyOwner {
         if (rewardVaultSetOnce) revert RewardVaultAlreadySet();
         if (vault == address(0)) revert ZeroAddress();
@@ -164,62 +159,70 @@ contract MMMToken is ERC20, Ownable {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        LAST NON ZERO TRACKING
+                        HOLD-TIME TRACKING
 
-        Balance-weighted entry timestamp ("WAT") closes the
-        dust-primer attack from issues.txt #6: priming a wallet with
-        1 wei used to satisfy minHoldTime forever, even after a real
-        position was moved in later. Now every NEW receipt pulls the
-        timestamp toward `now` proportional to its size:
-
-            newTs = (prevBal * prevTs + receivedAmount * now) / newBal
-
-        Tiny dust receipts barely shift the timestamp; a real
-        position snaps it close to `now`, forcing a fresh hold.
-        Sender-side resets only happen on a full exit so partial
-        sells continue to preserve hold-time eligibility.
+       Balance-weighted lastNonZeroAt: receiving tokens advances the
+       timestamp toward `now` proportional to inflow vs prior balance,
+       so dust priming (sending 1 wei to many wallets to mature them)
+       cannot skip the hold period for a later large inbound transfer.
+       Partial outflows preserve the timestamp; a full exit clears it.
     //////////////////////////////////////////////////////////////*/
 
-    function _onSendUpdate(address a) internal {
-        if (a == address(0)) return;
-        // Only reset on full exit. Partial sells keep their entry stamp.
-        if (balanceOf(a) == 0) {
-            lastNonZeroAt[a] = 0;
-        }
-    }
+    function _onIncrease(address a, uint256 oldBal, uint256 amountIn) internal {
+        if (a == address(0) || amountIn == 0) return;
 
-    function _onReceiveUpdate(address a, uint256 amountReceived) internal {
-        if (a == address(0)) return;
-
-        uint256 bal = balanceOf(a);
-
-        if (bal == 0) {
-            // Zero-amount receive into an empty wallet (no-op transfer).
-            lastNonZeroAt[a] = 0;
-            return;
-        }
-
-        if (amountReceived == 0) return;
-
-        uint256 prevBal = bal - amountReceived;
-        uint256 prevTs  = lastNonZeroAt[a];
-
-        // First entry, or re-entry after a previous full exit:
-        // start the clock fresh from now.
-        if (prevBal == 0 || prevTs == 0) {
+        if (oldBal == 0) {
             lastNonZeroAt[a] = block.timestamp;
             return;
         }
 
-        // Balance-weighted average. With current 1B-supply tokens and
-        // unix timestamps both fit in uint256 with massive headroom.
+        uint256 newBal = oldBal + amountIn;
+        uint256 oldLnz = lastNonZeroAt[a];
+        // weighted average:
+        //   newLnz = (oldBal * oldLnz + amountIn * now) / newBal
         lastNonZeroAt[a] =
-            (prevBal * prevTs + amountReceived * block.timestamp) / bal;
+            (oldBal * oldLnz + amountIn * block.timestamp) / newBal;
+    }
+
+    function _onDecrease(address a, uint256 oldBal, uint256 amountOut) internal {
+        if (a == address(0) || amountOut == 0) return;
+
+        if (oldBal == amountOut) {
+            // Full exit: clear the hold timer.
+            lastNonZeroAt[a] = 0;
+        }
+        // Partial exit: keep the existing timestamp — the user has held the
+        // remaining balance since lastNonZeroAt.
     }
 
     /*//////////////////////////////////////////////////////////////
                         TRANSFER LOGIC
     //////////////////////////////////////////////////////////////*/
+
+    function _doTransfer(address from, address to, uint256 amount) internal {
+        // Snapshot pre-transfer balances. balanceOf(0) is 0, so this is
+        // safe for mint/burn paths.
+        uint256 fromBal = from == address(0) ? 0 : balanceOf(from);
+        uint256 toBal   = to   == address(0) ? 0 : balanceOf(to);
+
+        // 1) Reward-debt sync hook — captures any pending rewards earned at
+        //    the OLD balance into RewardVault.creditedRewards and resets
+        //    each side's rewardDebt to the NEW balance. Prevents both
+        //    retroactive claiming for new holders and sniper-drain on big
+        //    buy + immediate claim.
+        address rv = rewardVault;
+        if (rv != address(0) && amount > 0) {
+            IRewardVaultHook(rv).syncOnTransfer(from, to, amount);
+        }
+
+        // 2) Hold-time tracking BEFORE balance change.
+        if (from != to) {
+            _onDecrease(from, fromBal, amount);
+            _onIncrease(to, toBal, amount);
+        }
+
+        super._update(from, to, amount);
+    }
 
     function _update(address from, address to, uint256 amount) internal override {
         address rv = rewardVault;
@@ -238,9 +241,7 @@ contract MMMToken is ERC20, Ownable {
 
         // Mint / Burn
         if (from == address(0) || to == address(0)) {
-            super._update(from, to, amount);
-            _onSendUpdate(from);
-            _onReceiveUpdate(to, amount);
+            _doTransfer(from, to, amount);
             return;
         }
 
@@ -263,9 +264,7 @@ contract MMMToken is ERC20, Ownable {
             !isTaxExempt[to];
 
         if (!takeTax) {
-            super._update(from, to, amount);
-            _onSendUpdate(from);
-            _onReceiveUpdate(to, amount);
+            _doTransfer(from, to, amount);
             return;
         }
 
@@ -274,52 +273,27 @@ contract MMMToken is ERC20, Ownable {
             : getSellTaxBps();
 
         if (taxBps == 0) {
-            super._update(from, to, amount);
-            _onSendUpdate(from);
-            _onReceiveUpdate(to, amount);
+            _doTransfer(from, to, amount);
             return;
         }
 
         uint256 tax = (amount * taxBps) / BPS;
 
-        // ------------------------------------------------------------
-        // BUY (pair → buyer)
-        // CRITICAL: DO NOT reduce amount leaving pair
-        // ------------------------------------------------------------
+        // BUY (pair → buyer): pair sends full amount, then buyer pays tax.
         if (isBuyTx) {
-            // 1️⃣ Pair sends full amount to buyer
-            super._update(from, to, amount);
-
-            // 2️⃣ Buyer pays tax to vault
-            super._update(to, taxVault, tax);
-
-            // Buyer's NET receipt is amount - tax. Sync the WAT against
-            // that net so a buy doesn't double-credit the buyer.
-            _onSendUpdate(from);
-            _onReceiveUpdate(to, amount - tax);
-            _onReceiveUpdate(taxVault, tax);
+            _doTransfer(from, to, amount);
+            _doTransfer(to, taxVault, tax);
             return;
         }
 
-        // ------------------------------------------------------------
-        // SELL (seller → pair)
-        // ------------------------------------------------------------
+        // SELL (seller → pair): seller pays tax, then net to pair.
         if (isSellTx) {
-            // Seller pays tax
-            super._update(from, taxVault, tax);
-
-            // Net goes to pair
-            super._update(from, to, amount - tax);
-
-            _onSendUpdate(from);
-            _onReceiveUpdate(taxVault, tax);
-            _onReceiveUpdate(to, amount - tax);
+            _doTransfer(from, taxVault, tax);
+            _doTransfer(from, to, amount - tax);
             return;
         }
 
         // Fallback (should never hit for AMM)
-        super._update(from, to, amount);
-        _onSendUpdate(from);
-        _onReceiveUpdate(to, amount);
+        _doTransfer(from, to, amount);
     }
 }
