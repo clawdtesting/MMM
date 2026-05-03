@@ -225,6 +225,19 @@ contract MMMToken is ERC20, Ownable {
     }
 
     function _update(address from, address to, uint256 amount) internal override {
+        address rv = rewardVault;
+        if (rv != address(0)) {
+            IRewardVaultHook(rv).preTransferHook(from, to);
+        }
+
+        _doUpdate(from, to, amount);
+
+        if (rv != address(0)) {
+            IRewardVaultHook(rv).postTransferHook(from, to);
+        }
+    }
+
+    function _doUpdate(address from, address to, uint256 amount) internal {
 
         // Mint / Burn
         if (from == address(0) || to == address(0)) {

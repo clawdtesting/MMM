@@ -151,9 +151,10 @@ contract RewardVault is Ownable, ReentrancyGuard {
         uint256 accrued = (bal * accRewardPerToken) / ACC_SCALE;
         uint256 debt = rewardDebt[user];
 
-        if (accrued <= debt) return 0;
+        uint256 unclaimedFromCurrent =
+            accrued > debt ? accrued - debt : 0;
 
-        return accrued - debt;
+        return claimable[user] + unclaimedFromCurrent;
     }
 
     /// Total claimable: live `pending()` plus credit captured by transfer
@@ -368,21 +369,67 @@ contract RewardVault is Ownable, ReentrancyGuard {
         claimed = livePending + credit;
         if (claimed == 0) revert NothingToClaim();
 
-        rewardDebt[user] =
-            (bal * accRewardPerToken) / ACC_SCALE;
+        // Zero the accumulator. rewardDebt was already set to bal*acc by
+        // _crystallise above, so any further accrual against the user's
+        // current balance starts cleanly.
+        claimable[user] = 0;
 
         if (credit > 0) creditedRewards[user] = 0;
 
         lastClaimAt[user] = uint48(nowTs);
 
-        totalClaimed += claimed;   // NEW
+        totalClaimed += claimed;
 
         require(
             IERC20Like(address(mmm)).transfer(user, claimed),
             "TransferFailed"
         );
+        // The transfer above will trigger MMMToken._update -> the hooks on
+        // this contract, which resync rewardDebt to the user's NEW balance
+        // (bal + claimed). No further bookkeeping needed here.
 
         emit Claimed(user, claimed);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TOKEN-TRIGGERED HOOKS
+    //////////////////////////////////////////////////////////////*/
+
+    // Called by MMMToken BEFORE balances change. Crystallises whatever the
+    // sender and receiver have earned against their CURRENT balances into
+    // the claimable accumulator, so the upcoming balance change cannot
+    // retro-grant or retro-strip rewards.
+    function preTransferHook(address from, address to) external onlyToken {
+        if (from != address(0)) _crystallise(from);
+        if (to   != address(0) && to != from) _crystallise(to);
+    }
+
+    // Called by MMMToken AFTER balances change. Resyncs rewardDebt to the
+    // post-transfer balance so future accrual is computed cleanly from the
+    // new position.
+    function postTransferHook(address from, address to) external onlyToken {
+        if (from != address(0)) _resyncDebt(from);
+        if (to   != address(0) && to != from) _resyncDebt(to);
+    }
+
+    function _crystallise(address user) internal {
+        uint256 bal = mmm.balanceOf(user);
+        uint256 accrued = (bal * accRewardPerToken) / ACC_SCALE;
+        uint256 debt = rewardDebt[user];
+
+        if (accrued > debt) {
+            uint256 added = accrued - debt;
+            claimable[user] += added;
+            emit Crystallised(user, added, claimable[user]);
+        }
+
+        // Mark the user as fully settled against the current acc + bal.
+        rewardDebt[user] = accrued;
+    }
+
+    function _resyncDebt(address user) internal {
+        uint256 bal = mmm.balanceOf(user);
+        rewardDebt[user] = (bal * accRewardPerToken) / ACC_SCALE;
     }
 
     /*//////////////////////////////////////////////////////////////

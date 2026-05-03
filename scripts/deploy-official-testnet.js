@@ -240,7 +240,8 @@ async function main() {
   await (await mmm.setPair(PAIR_ADDR)).wait();
   await (await mmm.setRouter(ROUTER_ADDR)).wait();
   await (await mmm.setTaxVaultOnce(TAXVAULT_ADDR)).wait();
-  console.log("MMM wired (pair, router, taxVault).");
+  await (await mmm.setRewardVaultOnce(REWARDVAULT_ADDR)).wait();
+  console.log("MMM wired (pair, router, taxVault, rewardVault).");
 
   /* ============================================================
      13. Tax Exemptions
