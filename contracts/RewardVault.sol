@@ -81,6 +81,11 @@ contract RewardVault is Ownable, ReentrancyGuard {
     // pool with a big buy + immediate claim.
     mapping(address => uint256) public creditedRewards;
 
+    // Carry-over from integer division in notifyRewardAmount so dust
+    // amounts ((amount * ACC_SCALE) % eligibleSupply) roll into the next
+    // distribution rather than getting silently discarded.
+    uint256 public notifyRemainder;
+
     /*//////////////////////////////////////////////////////////////
                         SUPPLY EXCLUSION
     //////////////////////////////////////////////////////////////*/
@@ -143,6 +148,8 @@ contract RewardVault is Ownable, ReentrancyGuard {
     }
 
     function pending(address user) public view returns (uint256) {
+
+        if (isExcludedFromRewards[user]) return 0;
 
         uint256 bal = mmm.balanceOf(user);
 
@@ -243,7 +250,11 @@ contract RewardVault is Ownable, ReentrancyGuard {
         uint256 denom = eligibleSupply();
         if (denom == 0) revert EligibleSupplyZero();
 
-        accRewardPerToken += (amount * ACC_SCALE) / denom;
+        // Carry over the previous remainder so dust never gets lost.
+        uint256 numerator = amount * ACC_SCALE + notifyRemainder;
+        accRewardPerToken += numerator / denom;
+        notifyRemainder    = numerator % denom;
+
         totalDistributed  += amount;
 
         emit Notified(amount, denom, accRewardPerToken);
@@ -311,6 +322,8 @@ contract RewardVault is Ownable, ReentrancyGuard {
         returns (uint256 claimed)
     {
         address user = msg.sender;
+
+        if (isExcludedFromRewards[user]) revert NotAuthorized();
 
         uint256 bal = mmm.balanceOf(user);
 

@@ -2,15 +2,16 @@ const { expect } = require("chai");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 const { ethers } = require("hardhat");
 const { coreFixture } = require("./fixtures/core.fixture");
+const { notifyAs } = require("./helpers/notifyAs");
 
 describe("RewardVault - Deterministic Distribution", function () {
 
   it("increases pending after notifyRewardAmount", async function () {
 
     const {
-      owner,
       user1,
       mmm,
+      taxVault,
       rewardVault,
       minHoldTime
     } = await loadFixture(coreFixture);
@@ -23,10 +24,11 @@ describe("RewardVault - Deterministic Distribution", function () {
 
     const p0 = await rewardVault.pending(user1.address);
 
-    // Simulate reward emission
+    // Simulate reward emission. RewardVault is owned by TaxVault under the
+    // production wiring set up in coreFixture; impersonate it.
     const rewardAmount = ethers.parseUnits("100", 18);
-
-    await rewardVault.connect(owner).notifyRewardAmount(rewardAmount);
+    await mmm.transfer(await rewardVault.getAddress(), rewardAmount);
+    await notifyAs(taxVault, rewardVault, rewardAmount);
 
     const p1 = await rewardVault.pending(user1.address);
 

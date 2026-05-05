@@ -2,6 +2,7 @@ const { expect } = require("chai");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 const { ethers } = require("hardhat");
 const { coreFixture } = require("./fixtures/core.fixture");
+const { notifyAs } = require("./helpers/notifyAs");
 
 describe("RewardVault - Claim Flow", function () {
 
@@ -11,6 +12,7 @@ describe("RewardVault - Claim Flow", function () {
       owner,
       user1,
       mmm,
+      taxVault,
       rewardVault,
       minHoldTime,
       cooldown
@@ -22,14 +24,14 @@ describe("RewardVault - Claim Flow", function () {
     // Pass hold time
     await time.increase(minHoldTime + 1);
 
-    // Emit rewards
+    // Emit rewards. RewardVault ownership is held by TaxVault under the
+    // production wiring; impersonate it for the notify.
     const rewardAmount = ethers.parseUnits("100", 18);
-    // 🔥 FUND REWARD VAULT WITH MMM
     await mmm.connect(owner).transfer(
       await rewardVault.getAddress(),
       rewardAmount
     );
-    await rewardVault.connect(owner).notifyRewardAmount(rewardAmount);
+    await notifyAs(taxVault, rewardVault, rewardAmount);
 
     const pendingBefore = await rewardVault.pending(user1.address);
     expect(pendingBefore).to.be.gt(0n);

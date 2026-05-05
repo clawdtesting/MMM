@@ -1,228 +1,155 @@
-// test/unit/MMMToken.test.js
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
-const { deployFixture } = require("../fixtures/protocol.fixture");
+const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { coreFixture } = require("../fixtures/core.fixture");
 
-describe("MMMToken", function () {
-  
-  describe("Basic Token Functions", function () {
-    
-    it("should have correct name and symbol", async function () {
-      const { MMM } = await loadFixture(protocolFixture)
-;
-      
-      expect(await MMM.name()).to.equal("MMM");
-      expect(await MMM.symbol()).to.equal("MMM");
-      expect(await MMM.decimals()).to.equal(18);
-    });
+describe("MMMToken — unit (basic ERC20)", function () {
 
-    it("should mint initial supply to owner", async function () {
-      const { MMM, owner } = await loadFixture(protocolFixture)
-;
-      
-      const balance = await MMM.balanceOf(owner.address);
-      const totalSupply = await MMM.totalSupply();
-      
-      expect(balance).to.be.gt(0);
-      expect(totalSupply).to.be.gt(0);
-    });
-
-    it("should allow transfers between accounts", async function () {
-      const { MMM, owner, user1 } = await loadFixture(protocolFixture)
-;
-      
-      const amount = ethers.parseUnits("100", 18);
-      await MMM.transfer(user1.address, amount);
-      
-      const balance = await MMM.balanceOf(user1.address);
-      expect(balance).to.equal(amount);
-    });
-
-    it("should allow approved transfers", async function () {
-      const { MMM, owner, user1, user2 } = await loadFixture(protocolFixture)
-;
-      
-      // Give user1 tokens
-      const amount = ethers.parseUnits("100", 18);
-      await MMM.transfer(user1.address, amount);
-      
-      // User1 approves user2
-      await MMM.connect(user1).approve(user2.address, amount);
-      
-      // User2 transfers from user1
-      await MMM.connect(user2).transferFrom(user1.address, user2.address, amount);
-      
-      const balance = await MMM.balanceOf(user2.address);
-      expect(balance).to.equal(amount);
-    });
+  it("has the deployment-supplied name, symbol and decimals", async function () {
+    const { mmm } = await loadFixture(coreFixture);
+    expect(await mmm.name()).to.equal("Monad Money Machine");
+    expect(await mmm.symbol()).to.equal("MMM");
+    expect(await mmm.decimals()).to.equal(18);
   });
 
-  describe("Tax Exemptions", function () {
-    
-    it("should mark addresses as tax exempt", async function () {
-      const { MMM, user1 } = await loadFixture(protocolFixture)
-;
-      
-      await MMM.setTaxExempt(user1.address, true);
-      
-      const isExempt = await MMM.isTaxExempt(user1.address);
-      expect(isExempt).to.be.true;
-    });
-
-    it("should remove tax exemption", async function () {
-      const { MMM, user1 } = await loadFixture(protocolFixture)
-;
-      
-      // Set exempt
-      await MMM.setTaxExempt(user1.address, true);
-      expect(await MMM.isTaxExempt(user1.address)).to.be.true;
-      
-      // Remove exempt
-      await MMM.setTaxExempt(user1.address, false);
-      expect(await MMM.isTaxExempt(user1.address)).to.be.false;
-    });
-
-    it("should only allow owner to set tax exemptions", async function () {
-      const { MMM, user1, user2 } = await loadFixture(protocolFixture)
-;
-      
-      await expect(
-        MMM.connect(user1).setTaxExempt(user2.address, true)
-      ).to.be.reverted;
-    });
+  it("mints the entire initial supply to the deployer-supplied owner", async function () {
+    const { mmm, owner } = await loadFixture(coreFixture);
+    expect(await mmm.balanceOf(owner.address)).to.equal(await mmm.totalSupply());
   });
 
-  describe("Hold Timer Tracking", function () {
-    
-    it("should track lastNonZeroAt on first receive", async function () {
-      const { MMM, user1 } = await loadFixture(protocolFixture)
-;
-      
-      // User starts with 0 balance
-      expect(await MMM.balanceOf(user1.address)).to.equal(0);
-      
-      // Transfer tokens
-      const amount = ethers.parseUnits("100", 18);
-      await MMM.transfer(user1.address, amount);
-      
-      // Check lastNonZeroAt is set
-      const lastNonZeroAt = await MMM.lastNonZeroAt(user1.address);
-      expect(lastNonZeroAt).to.be.gt(0);
-    });
-
-    it("should reset lastNonZeroAt when balance goes to zero", async function () {
-      const { MMM, owner, user1 } = await loadFixture(protocolFixture)
-;
-      
-      // Give user tokens
-      const amount = ethers.parseUnits("100", 18);
-      await MMM.transfer(user1.address, amount);
-      
-      const lastNonZeroAtBefore = await MMM.lastNonZeroAt(user1.address);
-      expect(lastNonZeroAtBefore).to.be.gt(0);
-      
-      // Transfer all back (balance = 0)
-      await MMM.connect(user1).transfer(owner.address, amount);
-      
-      // Should reset to 0
-      const lastNonZeroAtAfter = await MMM.lastNonZeroAt(user1.address);
-      expect(lastNonZeroAtAfter).to.equal(0);
-    });
-
-    it("should NOT reset lastNonZeroAt on additional receives", async function () {
-      const { MMM, user1 } = await loadFixture(protocolFixture)
-;
-      
-      // First transfer
-      const amount1 = ethers.parseUnits("100", 18);
-      await MMM.transfer(user1.address, amount1);
-      
-      const lastNonZeroAtFirst = await MMM.lastNonZeroAt(user1.address);
-      
-      // Second transfer (user still has balance)
-      const amount2 = ethers.parseUnits("50", 18);
-      await MMM.transfer(user1.address, amount2);
-      
-      const lastNonZeroAtSecond = await MMM.lastNonZeroAt(user1.address);
-      
-      // Should remain the same
-      expect(lastNonZeroAtSecond).to.equal(lastNonZeroAtFirst);
-    });
+  it("supports plain transfers between accounts", async function () {
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    const amount = ethers.parseUnits("100", 18);
+    await mmm.transfer(user1.address, amount);
+    expect(await mmm.balanceOf(user1.address)).to.equal(amount);
   });
 
-  describe("Tax Vault Integration", function () {
-    
-    it("should allow setting tax vault", async function () {
-      const { MMM, taxVault } = await loadFixture(protocolFixture)
-;
-      
-      const vault = await MMM.taxVault();
-      expect(vault).to.equal(await taxVault.getAddress());
-    });
-
-    it("should only allow owner to set tax vault", async function () {
-      const { MMM, user1, user2 } = await loadFixture(protocolFixture)
-;
-      
-      await expect(
-        MMM.connect(user1).setTaxVault(user2.address)
-      ).to.be.reverted;
-    });
-
-    it("should not allow zero address as tax vault", async function () {
-      const { MMM } = await loadFixture(protocolFixture)
-;
-      
-      await expect(
-        MMM.setTaxVault(ethers.ZeroAddress)
-      ).to.be.reverted;
-    });
+  it("supports approved transferFrom", async function () {
+    const { mmm, user1, user2 } = await loadFixture(coreFixture);
+    const amount = ethers.parseUnits("100", 18);
+    await mmm.transfer(user1.address, amount);
+    await mmm.connect(user1).approve(user2.address, amount);
+    await mmm.connect(user2).transferFrom(user1.address, user2.address, amount);
+    expect(await mmm.balanceOf(user2.address)).to.equal(amount);
   });
 
-  describe("Edge Cases", function () {
-    
-    it("should handle multiple transfers in same block", async function () {
-      const { MMM, user1, user2, user3 } = await loadFixture(protocolFixture)
-;
-      
-      const amount = ethers.parseUnits("100", 18);
-      
-      // Send to multiple users
-      await MMM.transfer(user1.address, amount);
-      await MMM.transfer(user2.address, amount);
-      await MMM.transfer(user3.address, amount);
-      
-      // All should have correct balances
-      expect(await MMM.balanceOf(user1.address)).to.equal(amount);
-      expect(await MMM.balanceOf(user2.address)).to.equal(amount);
-      expect(await MMM.balanceOf(user3.address)).to.equal(amount);
-    });
-
-    it("should revert transfer to zero address", async function () {
-      const { MMM } = await loadFixture(protocolFixture)
-;
-      
-      const amount = ethers.parseUnits("100", 18);
-      
-      await expect(
-        MMM.transfer(ethers.ZeroAddress, amount)
-      ).to.be.reverted;
-    });
-
-    it("should revert transfer exceeding balance", async function () {
-      const { MMM, user1, user2 } = await loadFixture(protocolFixture)
-;
-      
-      // Give user1 small amount
-      const amount = ethers.parseUnits("10", 18);
-      await MMM.transfer(user1.address, amount);
-      
-      // Try to transfer more
-      const tooMuch = ethers.parseUnits("100", 18);
-      await expect(
-        MMM.connect(user1).transfer(user2.address, tooMuch)
-      ).to.be.reverted;
-    });
+  it("reverts on transfer to the zero address", async function () {
+    const { mmm } = await loadFixture(coreFixture);
+    await expect(
+      mmm.transfer(ethers.ZeroAddress, ethers.parseUnits("100", 18))
+    ).to.be.reverted;
   });
+
+  it("reverts on transfer exceeding balance", async function () {
+    const { mmm, user1, user2 } = await loadFixture(coreFixture);
+    await mmm.transfer(user1.address, ethers.parseUnits("10", 18));
+    await expect(
+      mmm.connect(user1).transfer(user2.address, ethers.parseUnits("100", 18))
+    ).to.be.reverted;
+  });
+
+});
+
+describe("MMMToken — unit (tax exemption admin)", function () {
+
+  it("owner can set and unset tax exemption", async function () {
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    await mmm.setTaxExempt(user1.address, true);
+    expect(await mmm.isTaxExempt(user1.address)).to.be.true;
+    await mmm.setTaxExempt(user1.address, false);
+    expect(await mmm.isTaxExempt(user1.address)).to.be.false;
+  });
+
+  it("non-owner cannot set tax exemption", async function () {
+    const { mmm, user1, user2 } = await loadFixture(coreFixture);
+    await expect(
+      mmm.connect(user1).setTaxExempt(user2.address, true)
+    ).to.be.reverted;
+  });
+
+});
+
+describe("MMMToken — unit (tax vault wiring)", function () {
+
+  it("exposes the wired taxVault address", async function () {
+    const { mmm, taxVault } = await loadFixture(coreFixture);
+    expect(await mmm.taxVault()).to.equal(await taxVault.getAddress());
+  });
+
+  it("rejects a second setTaxVaultOnce", async function () {
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    await expect(mmm.setTaxVaultOnce(user1.address)).to.be.reverted;
+  });
+
+  it("rejects zero address on first setTaxVaultOnce", async function () {
+    // Deploy a fresh token (the fixture-bound one is already wired) and
+    // verify the zero-address guard fires.
+    const [signer] = await ethers.getSigners();
+    const Tok = await ethers.getContractFactory("MMMToken");
+    const fresh = await Tok.deploy("X", "X", 0, signer.address);
+    await fresh.waitForDeployment();
+    await expect(fresh.setTaxVaultOnce(ethers.ZeroAddress)).to.be.reverted;
+  });
+
+});
+
+describe("MMMToken — unit (reward vault wiring)", function () {
+
+  it("exposes the wired rewardVault address", async function () {
+    const { mmm, rewardVault } = await loadFixture(coreFixture);
+    expect(await mmm.rewardVault()).to.equal(await rewardVault.getAddress());
+  });
+
+  it("rejects a second setRewardVaultOnce", async function () {
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    await expect(mmm.setRewardVaultOnce(user1.address)).to.be.reverted;
+  });
+
+});
+
+describe("MMMToken — unit (lastNonZeroAt tracking)", function () {
+
+  it("sets lastNonZeroAt on first receive from zero balance", async function () {
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    expect(await mmm.balanceOf(user1.address)).to.equal(0n);
+    await mmm.transfer(user1.address, ethers.parseUnits("100", 18));
+    expect(await mmm.lastNonZeroAt(user1.address)).to.be.gt(0n);
+  });
+
+  it("clears lastNonZeroAt on full balance exit", async function () {
+    const { mmm, owner, user1 } = await loadFixture(coreFixture);
+    const amount = ethers.parseUnits("100", 18);
+    await mmm.transfer(user1.address, amount);
+    expect(await mmm.lastNonZeroAt(user1.address)).to.be.gt(0n);
+    await mmm.connect(user1).transfer(owner.address, amount);
+    expect(await mmm.lastNonZeroAt(user1.address)).to.equal(0n);
+  });
+
+  it("preserves lastNonZeroAt on a partial sell", async function () {
+    const { mmm, owner, user1 } = await loadFixture(coreFixture);
+    await mmm.transfer(user1.address, ethers.parseUnits("100", 18));
+    const before = await mmm.lastNonZeroAt(user1.address);
+    await mmm.connect(user1).transfer(
+      owner.address,
+      ethers.parseUnits("40", 18)
+    );
+    expect(await mmm.lastNonZeroAt(user1.address)).to.equal(before);
+  });
+
+  it("balance-weights lastNonZeroAt forward on a top-up", async function () {
+    // Receiving more tokens shifts lastNonZeroAt toward `now`,
+    // proportional to the inflow vs prior balance. This is the
+    // dust-resistance fix; old contract held the timestamp constant.
+    const { mmm, user1 } = await loadFixture(coreFixture);
+    const initial = ethers.parseUnits("100", 18);
+    await mmm.transfer(user1.address, initial);
+    const lnzInitial = await mmm.lastNonZeroAt(user1.address);
+
+    await time.increase(1000);
+    await mmm.transfer(user1.address, initial);
+
+    const lnzAfter = await mmm.lastNonZeroAt(user1.address);
+    expect(lnzAfter).to.be.gt(lnzInitial);
+  });
+
 });
