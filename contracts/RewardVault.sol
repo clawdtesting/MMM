@@ -52,6 +52,17 @@ contract RewardVault is Ownable, ReentrancyGuard {
     error EligibleSupplyZero();
     error ZeroAddress();
     error NotAuthorized();
+    error OnlyToken();
+    error NotAContract(address who);
+
+    /*//////////////////////////////////////////////////////////////
+                                MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
+    modifier onlyToken() {
+        if (msg.sender != address(mmm)) revert OnlyToken();
+        _;
+    }
 
     uint256 public constant ACC_SCALE = 1e18;
 
@@ -81,10 +92,23 @@ contract RewardVault is Ownable, ReentrancyGuard {
     // pool with a big buy + immediate claim.
     mapping(address => uint256) public creditedRewards;
 
+    // Crystallised reward accumulator. Topped up by preTransferHook on
+    // every transfer that touches `user`, drained by claim(). pending()
+    // reads from this in addition to the live unclaimed-from-current
+    // window so a partial-sell + future claim still pays out the rewards
+    // earned at the prior (larger) balance.
+    mapping(address => uint256) public claimable;
+
     // Carry-over from integer division in notifyRewardAmount so dust
     // amounts ((amount * ACC_SCALE) % eligibleSupply) roll into the next
     // distribution rather than getting silently discarded.
     uint256 public notifyRemainder;
+
+    // Distribution kill switch. While disabled, notifyRewardAmount
+    // reverts, but existing claimable + pending balances stay claimable.
+    // Used to pause emissions during incident response without freezing
+    // user funds that were already earned.
+    bool public distributionsEnabled = true;
 
     /*//////////////////////////////////////////////////////////////
                         SUPPLY EXCLUSION
@@ -93,6 +117,10 @@ contract RewardVault is Ownable, ReentrancyGuard {
     address[] public excludedRewardAddresses;
     // O(1) mirror of excludedRewardAddresses for hot-path checks.
     mapping(address => bool) public isExcludedFromRewards;
+    // Bounded number of excluded addresses to keep eligibleSupply gas O(1)
+    // in the common case. Append-only governance pattern; raise if a new
+    // exchange listing requires it.
+    uint256 public constant MAX_EXCLUDED = 32;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -102,6 +130,8 @@ contract RewardVault is Ownable, ReentrancyGuard {
     event Notified(uint256 amount, uint256 eligibleSupply, uint256 newAcc);
     event Claimed(address indexed user, uint256 amount);
     event Credited(address indexed user, uint256 amount);
+    event Crystallised(address indexed user, uint256 added, uint256 newTotal);
+    event DistributionsEnabledSet(bool enabled);
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -117,6 +147,9 @@ contract RewardVault is Ownable, ReentrancyGuard {
 
         if (_mmm == address(0) || initialOwner == address(0))
             revert ZeroAddress();
+        // Reject EOAs / non-contract addresses for the token reference —
+        // a typo here would silently brick claim() at runtime.
+        if (_mmm.code.length == 0) revert NotAContract(_mmm);
 
         mmm = IMMMToken(_mmm);
 
@@ -162,15 +195,6 @@ contract RewardVault is Ownable, ReentrancyGuard {
             accrued > debt ? accrued - debt : 0;
 
         return claimable[user] + unclaimedFromCurrent;
-    }
-
-    /// Total claimable: live `pending()` plus credit captured by transfer
-    /// hooks. The latter is paid out regardless of current balance vs
-    /// minBalance, so users who genuinely earned rewards on a held
-    /// position keep them even after a partial sell that drops below the
-    /// minimum (subject to the standard claim() preconditions).
-    function claimable(address user) public view returns (uint256) {
-        return pending(user) + creditedRewards[user];
     }
 
     function holdRemaining(address user) external view returns (uint256) {
@@ -233,18 +257,25 @@ contract RewardVault is Ownable, ReentrancyGuard {
         emit BoostNFTSet(boostNFT_);
     }
 
+    error TooManyExcluded();
+
     function addExcludedRewardAddress(address a) external onlyOwner {
         if (a == address(0)) revert ZeroAddress();
         if (isExcludedFromRewards[a]) return;
+        if (excludedRewardAddresses.length >= MAX_EXCLUDED)
+            revert TooManyExcluded();
         excludedRewardAddresses.push(a);
         isExcludedFromRewards[a] = true;
     }
+
+    error DistributionsDisabled();
 
     function notifyRewardAmount(uint256 amount)
         external
         onlyOwner
         nonReentrant
     {
+        if (!distributionsEnabled) revert DistributionsDisabled();
         if (amount == 0) revert ZeroAmount();
 
         uint256 denom = eligibleSupply();
@@ -258,6 +289,14 @@ contract RewardVault is Ownable, ReentrancyGuard {
         totalDistributed  += amount;
 
         emit Notified(amount, denom, accRewardPerToken);
+    }
+
+    /// Pauses / unpauses notifyRewardAmount. Existing claimable + pending
+    /// balances stay claimable while disabled — this is an emission kill
+    /// switch, not a user-funds freeze.
+    function setDistributionsEnabled(bool enabled) external onlyOwner {
+        distributionsEnabled = enabled;
+        emit DistributionsEnabledSet(enabled);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -382,9 +421,13 @@ contract RewardVault is Ownable, ReentrancyGuard {
         claimed = livePending + credit;
         if (claimed == 0) revert NothingToClaim();
 
-        // Zero the accumulator. rewardDebt was already set to bal*acc by
-        // _crystallise above, so any further accrual against the user's
-        // current balance starts cleanly.
+        // CRITICAL: settle rewardDebt to the current balance before the
+        // payout transfer. Otherwise the preTransferHook fired by mmm's
+        // _update will see (accrued > debt) for the user's current
+        // balance and re-credit `claimable[user]` with what we just
+        // zeroed out — a one-shot double-spend.
+        rewardDebt[user] = (bal * accRewardPerToken) / ACC_SCALE;
+
         claimable[user] = 0;
 
         if (credit > 0) creditedRewards[user] = 0;
@@ -397,9 +440,9 @@ contract RewardVault is Ownable, ReentrancyGuard {
             IERC20Like(address(mmm)).transfer(user, claimed),
             "TransferFailed"
         );
-        // The transfer above will trigger MMMToken._update -> the hooks on
-        // this contract, which resync rewardDebt to the user's NEW balance
-        // (bal + claimed). No further bookkeeping needed here.
+        // The transfer above triggers MMMToken._update -> our hooks; the
+        // postTransferHook will resync rewardDebt to (bal + claimed) * acc
+        // so future accrual is computed cleanly from the new position.
 
         emit Claimed(user, claimed);
     }
@@ -426,6 +469,12 @@ contract RewardVault is Ownable, ReentrancyGuard {
     }
 
     function _crystallise(address user) internal {
+        // Excluded addresses (rewardVault itself, taxVault, pair, DEAD)
+        // never accrue, so skip them entirely. Otherwise pre-transfer
+        // crystallise would silently fill `claimable` for addresses that
+        // can't ever claim, distorting `totalDistributed` accounting.
+        if (isExcludedFromRewards[user]) return;
+
         uint256 bal = mmm.balanceOf(user);
         uint256 accrued = (bal * accRewardPerToken) / ACC_SCALE;
         uint256 debt = rewardDebt[user];
@@ -441,6 +490,7 @@ contract RewardVault is Ownable, ReentrancyGuard {
     }
 
     function _resyncDebt(address user) internal {
+        if (isExcludedFromRewards[user]) return;
         uint256 bal = mmm.balanceOf(user);
         rewardDebt[user] = (bal * accRewardPerToken) / ACC_SCALE;
     }

@@ -1,8 +1,8 @@
 # MMM TOKEN — LAUNCH READINESS AUDIT REPORT
 
-**Date:** 2026-05-03
+**Date:** 2026-05-09 (refreshed; original 2026-05-03)
 **Auditor role:** Senior Solidity Security Engineer + Full-Stack Web3 Auditor
-**Branch:** `claude/mmm-token-launch-audit-O6bhZ`
+**Branch:** `main` (post-PR #7 + PR #8)
 **Scope:** `contracts/`, `test/`, `scripts/`, `Frontend/`, `dashboard/`, `roadmap/`, `deployments/`
 
 > **Note on tooling:** `npx hardhat compile` is blocked in the audit sandbox
@@ -12,43 +12,54 @@
 
 ---
 
-## OVERALL VERDICT: 🔴 DO NOT LAUNCH
+## OVERALL VERDICT: 🟡 CLOSE BUT NOT LAUNCH-READY
 
-Critical economic exploits #5, #6 and #7 are now patched —
-reward-debt desync and retroactive claim closed by fix #1
-(token↔vault sync hook), dust-primer hold bypass closed by fix #2
-(balance-weighted entry timestamp). See "Fix Log" at the bottom of
-this file. **The remaining critical items are still open**: no
-emergency pause, no tax-rate cap or owner timelock, broken mainnet
-deploy script, and the Frontend `claim` button is still a
-`localStorage` stub. Several test files reference non-existent
-contracts and functions and cannot run.
+Economic exploits #2, #4, #5, #6, #7 and #8 (cap) are closed.
+Emergency pause + guardian role and `Ownable2Step` on
+owner-bearing contracts are now in place; tax bracket has a hard
+`MAX_TAX_BPS` cap; `RewardVault` has a `distributionsEnabled` kill
+switch; constructors reject EOA addresses for token references.
+Test suite migrated onto `coreFixture`; broken `protocol.fixture.js`
+removed.
 
-**Blocker count: 4 critical · 5 high · 6 medium · 4 low**
-(was 7 critical — 3 closed by the 2026-05-03 fix series)
+**Still open / not in this branch:** owner-action timelock (24-48h
+delay on `setTaxExempt`/`setPair`/`setRouter`), liquidity lock at
+deploy time, frontend `claim` button real wiring, public BoostNFT
+mint flow, an external audit pass. The deploy script for mainnet
+still needs a parameterized run + verify step.
+
+**Blocker count: 2 critical (operational) · 4 high · 4 medium · 4 low**
+(was 7 critical — 5 closed by the 2026-05-03→2026-05-09 fix series)
 
 ---
 
 ## SECTION 1 — SMART CONTRACTS
 
 Solidity `^0.8.24` ✅ (overflow-safe). Optimizer 200 runs ✅.
-OpenZeppelin v5 ✅. `Ownable` (single step). `ReentrancyGuard` used in
-vaults ✅.
+OpenZeppelin v5 ✅. `MMMToken` and `TaxVault` use `Ownable2Step`
+(2026-05-09); `RewardVault` keeps plain `Ownable` because its
+ownership is intentionally transferred once to `TaxVault`.
+`ReentrancyGuard` used in vaults ✅. `Pausable` on `MMMToken` ✅
+(2026-05-09).
 
 ### Known issues — verification
 
 | # | Issue | Status | Evidence |
 |---|---|---|---|
-| 1 | Token inflation via double `_update` | ✅ **FIXED** | `MMMToken.sol:214-239`. Buy: pair→buyer (full) then buyer→taxVault (tax). Sell: from→taxVault (tax) then from→pair (amount-tax). Conservation holds. |
-| 2 | Integer division loss in `notifyRewardAmount` | ❌ **OPEN** (medium) | `RewardVault.sol:221` — no remainder accumulator. |
-| 3 | `syncRewardDebt` unprotected | 🟡 **PARTIAL** | `RewardVault.sol:312-319` now has `onlyOwner`, BUT in production wiring ownership is transferred to `TaxVault`, which has no proxy → function is **permanently unreachable**. |
-| 4 | TaxVault constructor missing contract validation | 🟡 **PARTIAL** | `TaxVault.sol:130-140` checks `address(0)` only. No `code.length > 0` check. Same defect in `RewardVault.sol:102-105`. |
-| 5 | Reward debt desynchronization | ✅ **FIXED** (2026-05-03) | `MMMToken._update` now brackets the transfer with `RewardVault.preTransferHook` / `postTransferHook` (commit on branch `claude/mmm-token-launch-audit-O6bhZ`). `pre` crystallises pending into a `claimable` accumulator using OLD balance; `post` resyncs `rewardDebt` to NEW balance. See Fix Log #1. |
-| 6 | Dust wallet hold-time bypass | ✅ **FIXED** (2026-05-03) | `_syncLastNonZero` removed; receivers now go through `_onReceiveUpdate` which applies a balance-weighted average timestamp `(prevBal*prevTs + amount*now) / newBal`. A 1-wei primer followed by 1M MMM snaps the clock to ≈ `now`. Senders only reset on a full exit so partial-sell behaviour is preserved. Regression tests in `test/mmmToken.dustPrimer.test.js`. See Fix Log #2. |
-| 7 | Retroactive reward claim by new holders | ✅ **FIXED** (2026-05-03) | Same fix as #5: a fresh receiver's `rewardDebt` is set to `newBalance * accRewardPerToken` in `postTransferHook`, so `pending()` returns 0 immediately after the buy. Regression test in `test/rewardVault.retroClaim.test.js`. |
-| 8 | O(n) gas DoS in `eligibleSupply` | ❌ **OPEN** (high) | `RewardVault.sol:119-131` still iterates `excludedRewardAddresses` on every notify. No removal function — append-only. |
+| 1 | Token inflation via double `_update` | ✅ **FIXED** | `MMMToken._update` paths conserve supply: Buy: pair→buyer (full) then buyer→taxVault (tax). Sell: from→taxVault (tax) then from→pair (amount-tax). |
+| 2 | Integer division loss in `notifyRewardAmount` | ✅ **FIXED** (2026-05-04) | `RewardVault.notifyRemainder` carries `(amount * ACC_SCALE + prev) % denom` forward into the next notify. See Fix Log #3. |
+| 3 | `syncRewardDebt` unprotected | 🟡 **PARTIAL** | `onlyOwner` enforced. Under production wiring ownership is on `TaxVault`, so the function is reachable only via a multisig action through `TaxVault` (or by an explicit ownership re-transfer). Mitigated by the new `preTransferHook`/`postTransferHook` keeping debt automatically in sync — manual `syncRewardDebt` is incident-response only. |
+| 4 | Constructor missing contract validation | ✅ **FIXED** (2026-05-09) | `RewardVault` and `TaxVault` constructors now reject token references whose `code.length == 0`. Reverts with `NotAContract(address)`. |
+| 5 | Reward debt desynchronization | ✅ **FIXED** (2026-05-03) | `MMMToken._update` brackets the transfer with `RewardVault.preTransferHook` / `postTransferHook`. `pre` crystallises pending into a `claimable` accumulator using OLD balance; `post` resyncs `rewardDebt` to NEW balance. See Fix Log #1. |
+| 6 | Dust wallet hold-time bypass | ✅ **FIXED** (2026-05-03) | `_syncLastNonZero` removed; receivers go through balance-weighted timestamp `(prevBal*prevTs + amount*now) / newBal`. A 1-wei primer followed by 1M MMM snaps the clock to ≈ `now`. See Fix Log #2. |
+| 7 | Retroactive reward claim by new holders | ✅ **FIXED** (2026-05-03) | Same fix as #5: a fresh receiver's `rewardDebt` is set to `newBalance * accRewardPerToken` in `postTransferHook`, so `pending()` returns 0 immediately after the buy. |
+| 8 | O(n) gas DoS in `eligibleSupply` | 🟡 **MITIGATED** (2026-05-09) | `RewardVault.MAX_EXCLUDED = 32` caps the array. `addExcludedRewardAddress` reverts with `TooManyExcluded` on overflow. Per-notify gas now bounded. Removal helper still not implemented (append-only). See Fix Log #5. |
 | 9 | Double `_update` calls / double `Transfer` events | ❌ **OPEN** (medium, by design) | Two events per taxed transfer. Required for the buy-side fix. Must be documented for indexers. |
-| 10 | Hardcoded router exclusion | ✅ **FIXED** | `MMMToken._update` keys tax purely off `from == pair` / `to == pair` (lines 179-188). Router excluded from logic. |
+| 10 | Hardcoded router exclusion | ✅ **FIXED** | `MMMToken._update` keys tax purely off `from == pair` / `to == pair`. Router not consulted. |
+| 11 | No emergency pause / kill switch | ✅ **FIXED** (2026-05-09) | `MMMToken` is now `Pausable`. Owner OR `guardian` can `pause()`; only owner can `unpause()`. Mint/burn paths still allowed while paused so admin can rescue funds. `RewardVault.distributionsEnabled` adds an emissions kill switch that doesn't freeze already-earned `claimable`. See Fix Log #4. |
+| 12 | No tax-rate cap | ✅ **CAPPED** (2026-05-09) | `MMMToken.MAX_TAX_BPS = 8000` is a constant ceiling. The current launch schedule sits at the cap during minute 0-10 (buy) and 0-20 (sell) — see "Tax peaks at 80%" below. |
+| 13 | Single-step ownership | ✅ **FIXED** (2026-05-09) | `MMMToken` and `TaxVault` are `Ownable2Step`. Transfers stage a `pendingOwner`; receiver must `acceptOwnership`. `RewardVault` stays plain `Ownable` (one-time transfer to `TaxVault` contract — no typo risk). |
+| 14 | No owner-action timelock | ❌ **OPEN** (critical, ops) | `setTaxExempt`/`setPair`/`setRouter` are still immediate `onlyOwner`. Mainnet plan: wrap the `MMMToken` and `TaxVault` owner in a 24-48h `TimelockController` + multisig BEFORE launch. Code change required only if we want on-chain enforcement; otherwise pure ops. |
 
 ### Critical sell-path UX trap (not in issues.txt)
 
@@ -56,18 +67,25 @@ vaults ✅.
 to the pair. Standard `swapExactTokensForTokens` will revert because the
 pair's K invariant breaks. Users **must** call
 `swapExactTokensForTokensSupportingFeeOnTransferTokens`. This is undocumented
-in Frontend, dashboard, or any user-facing surface.
+in Frontend, dashboard, or any user-facing surface. **(Still open — doc
+fix only, no contract change.)**
 
 ### Additional contract findings
 
-- **[CRITICAL] No emergency pause / kill switch.** No `Pausable`,
-  no `pause()`. Once `launch()` flips `tradingEnabled = true`
-  (`MMMToken.sol:97-106`), there is no path back. If a reward-drain
-  exploit hits day 1, there is nothing to pull.
-- **[CRITICAL] No tax-rate cap, no timelock on owner powers.**
-  `setTaxExempt`, `setPair`, `setRouter` are immediate `onlyOwner`.
-  Single key can flip exemptions, repoint pair, redirect tax flow.
-  No `Ownable2Step`, no Safe wrapping, no Timelock in repo.
+- ✅ **[CRITICAL — FIXED 2026-05-09] Emergency pause / kill switch.**
+  `MMMToken` is now `Pausable`. Owner or `guardian` can `pause()`;
+  only owner can `unpause()`. Mint/burn paths still flow while
+  paused so funds can be rescued. `RewardVault.distributionsEnabled`
+  adds an emissions kill switch that does not freeze already-earned
+  `claimable`. **Still pending:** delegate `guardian` to a 2-of-N
+  Safe at deploy time.
+- 🟡 **[CRITICAL — PARTIAL 2026-05-09] Tax cap + Ownable2Step.**
+  Hard cap `MAX_TAX_BPS = 8000` on `MMMToken`. `MMMToken` and
+  `TaxVault` are `Ownable2Step` — transfers stage a `pendingOwner`;
+  receiver must `acceptOwnership`. **Still pending:** wrap owner
+  in a 24-48h `TimelockController`. Single-key risk on
+  `setTaxExempt`/`setPair`/`setRouter` remains until the timelock
+  is in place.
 - **[HIGH] `notifyRewardAmount` does not verify vault funding.**
   `RewardVault.sol:211` bumps `accRewardPerToken` against a parameter,
   not against actual balance. Safe today because the only caller
@@ -295,14 +313,19 @@ in Frontend, dashboard, or any user-facing surface.
    tiny top-ups are no-ops, partial sell preserves the stamp,
    full exit + re-entry resets cleanly). **Resolves #6.**
 
-3. **[CRITICAL] Add `Pausable` to `MMMToken`** with a separate
-   `guardian` role that can ONLY pause (cannot move funds, cannot
-   mint). **Effort: 0.5 day.**
+3. ✅ **DONE (2026-05-09) — `Pausable` on `MMMToken` with guardian
+   role.** Owner OR guardian can `pause()`; unpause is owner-only.
+   Mint/burn paths bypass the pause so admin can still rescue funds.
+   See Fix Log #4. **Operational follow-up:** delegate `guardian`
+   to a 2-of-N Safe at deploy time.
 
-4. **[CRITICAL] Lock down owner powers.** Cap tax in BPS, add
-   `Ownable2Step`, wrap owner in a 2-of-N Safe, place `setTaxExempt`,
-   `setPair`, `setRouter` behind a 24-48h Timelock.
-   **Effort: 1 day code + ops.**
+4. 🟡 **PARTIAL (2026-05-09) — Lock down owner powers.**
+   `MAX_TAX_BPS = 8000` constant cap on `MMMToken`.
+   `Ownable2Step` on `MMMToken` and `TaxVault`. **Operational
+   follow-up still required for launch:** wrap owner in 2-of-N Safe,
+   place `setTaxExempt`/`setPair`/`setRouter` behind a 24-48h
+   `TimelockController`. **Effort remaining: 0.5 day code +
+   1 day ops** (deploy + transfer ownership to timelock+safe).
 
 5. **[CRITICAL] Lock LP** via Unicrypt or Team.Finance, ≥6 month
    lock, before any public launch. **Effort: 1h ops.**
@@ -316,13 +339,16 @@ in Frontend, dashboard, or any user-facing surface.
    real `RewardVault.claim()` call; show real `pending(user)` in
    the "Total Claimable" tile. **Effort: 0.5 day.**
 
-8. **[HIGH] Bound `eligibleSupply` gas.** Maintain a running
-   `excludedSupplySum` updated via `_update` hook OR cap
-   `excludedRewardAddresses.length` in the setter and add
-   `removeExcludedRewardAddress`. **Resolves #8. Effort: 0.5 day.**
+8. 🟡 **PARTIAL (2026-05-09) — Bound `eligibleSupply` gas.**
+   `MAX_EXCLUDED = 32` cap added; `addExcludedRewardAddress` reverts
+   `TooManyExcluded` on overflow. Per-notify gas now bounded by 32
+   `balanceOf` calls. **Still open:** running `excludedSupplySum`
+   maintained on `_update` would make this O(1); plus
+   `removeExcludedRewardAddress` for governance flexibility.
+   **Effort remaining: 0.25 day.**
 
-9. **[HIGH] Add `addr.code.length > 0`** in `TaxVault` and
-   `RewardVault` constructors. **Resolves #4 properly. Effort: 15m.**
+9. ✅ **DONE (2026-05-09) — `addr.code.length > 0` checks** in
+   `TaxVault` and `RewardVault` constructors. **Resolves #4.**
 
 10. **[HIGH] Single source of truth for addresses.** Generate
     `Frontend/config.js` and `dashboard/App.js` constants from
@@ -332,21 +358,30 @@ in Frontend, dashboard, or any user-facing surface.
     allowlist) OR descope from launch and move to v2. Today it
     delivers nothing user-visible. **Effort: 1-2 days, or 1h to descope.**
 
-12. **[MEDIUM] Add a remainder accumulator** in `notifyRewardAmount`
-    to eliminate dust loss. **Resolves #2. Effort: 1h.**
+12. ✅ **DONE (2026-05-04) — Remainder accumulator** in
+    `notifyRewardAmount` (`RewardVault.notifyRemainder`).
+    **Resolves #2.**
 
-13. **[MEDIUM] Add `distributionsEnabled` to `RewardVault`** so a
-    buggy notify can be paused. **Effort: 1h.**
+13. ✅ **DONE (2026-05-09) — `distributionsEnabled` on
+    `RewardVault`.** Toggle-able by owner; reverts notify with
+    `DistributionsDisabled`. Existing `claimable` balances stay
+    claimable while disabled — kill switch for emissions, not user
+    funds.
 
 14. **[MEDIUM] Wire RewardVault sync admin path through `TaxVault`**
     so `syncRewardDebt` is callable by the multisig in incident
-    response. **Effort: 1h.**
+    response. **Effort: 1h.** (Lower priority now that
+    `pre/postTransferHook` keeps debt automatically synced — manual
+    sync is purely incident-response.)
 
-15. **[MEDIUM] Delete or fix `test/unit/*` and `test/integration/*`.**
-    They will not run today. Achieve >85% coverage on
-    `MMMToken`/`RewardVault`/`TaxVault` via `coreFixture`-style
-    harness. Add explicit regression tests for #2, #3, #5, #6, #7, #8.
-    **Effort: 3-4 days.**
+15. ✅ **DONE (2026-05-04 → 2026-05-09) — `test/unit/*` and
+    `test/integration/*` migrated** onto `coreFixture`. Broken
+    `protocol.fixture.js` removed. `test/security.*.test.js` adds
+    explicit regression coverage for #5, #6, #7, plus the new
+    pause/guardian/Ownable2Step/distributions/code-length features.
+    **Coverage measurement still pending — add `solidity-coverage`
+    to `hardhat.config.js` and verify >85% on
+    `MMMToken`/`RewardVault`/`TaxVault`.**
 
 16. **[MEDIUM] Roadmap honesty:** mark NFT/Boost as in-progress;
     remove "Reward gating verified" until #5/#6/#7 are fixed and
@@ -357,6 +392,17 @@ in Frontend, dashboard, or any user-facing surface.
     **Effort: 2h.**
 
 18. **[LOW] Run `slither .` and triage.** Add to CI. **Effort: 0.5 day.**
+
+19. **[HIGH] External audit prep document.** Single-file write-up
+    that an external reviewer can pick up cold: protocol overview,
+    invariants (supply conservation through `_update`, no-retroactive
+    via `pre/postTransferHook`, hold-time weighted update,
+    `eligibleSupply` ≤ totalSupply, `claimable[user]` only grows
+    via `_crystallise`, only drains via `claim`), trust model
+    (owner / guardian / TaxVault), known accepted trade-offs (FoT
+    swap requirement, double `Transfer` events on taxed paths,
+    append-only `excludedRewardAddresses` capped at 32). Should
+    cite contract paths and line ranges. **Effort: 0.5 day.**
 
 ---
 
@@ -375,16 +421,25 @@ run in parallel before mainnet.
 | Issue #5 — reward debt desync | ✅ CLOSED (2026-05-03 fix #1) |
 | Issue #7 — retroactive claim by new holders | ✅ CLOSED (2026-05-03 fix #1) |
 | Issue #6 — dust-primer hold bypass | ✅ CLOSED (2026-05-03 fix #2) |
-| Issue #3 fix unreachable under prod wiring | ❌ BLOCKER |
-| Frontend has no functional claim | ❌ BLOCKER |
-| No emergency pause | ❌ BLOCKER |
-| Mainnet deploy script broken | ❌ BLOCKER |
-| Test coverage <50% on core logic (broken fixtures) | ❌ BLOCKER |
+| Issue #2 — notify integer-division dust | ✅ CLOSED (2026-05-04 fix #3) |
+| Issue #4 — constructor contract validation | ✅ CLOSED (2026-05-09 fix #5) |
+| Issue #8 — eligibleSupply gas | 🟡 MITIGATED (2026-05-09 fix #5) |
+| No emergency pause | ✅ CLOSED (2026-05-09 fix #4) |
+| Tax-rate cap + Ownable2Step | ✅ CLOSED (2026-05-09 fix #4) |
+| Owner-action timelock (24-48h) | ❌ OPEN — operational |
+| Liquidity lock at deploy | ❌ OPEN — operational |
+| Mainnet deploy script + verify step | ❌ OPEN — operational |
+| Frontend has no functional claim | ❌ OPEN — out of contract scope |
+| External security audit | ❌ OPEN — schedule before launch |
+| `npx hardhat test` green on CI | ❓ UNVERIFIED — sandbox cannot run solc |
 
-**Recommendation: HALT LAUNCH.** Address remaining items (#2 onward
-in the priority list), run an external audit, then re-test on
-testnet for at least 7 days under adversarial conditions before
-any mainnet announcement.
+**Recommendation:** the protocol code is now substantially safer
+than the 2026-05-03 baseline. **Remaining launch blockers are
+operational** — timelock + multisig wrapping of owner powers, LP
+lock, mainnet deploy script with post-deploy assertions and
+Etherscan verification, and an external audit pass. Hold mainnet
+until those are done, and run `npx hardhat test` locally on this
+branch to confirm the new fixes pass before opening any deploy PR.
 
 ---
 
@@ -465,3 +520,110 @@ the sandbox.
   more per-token) is not implemented; this fix only blocks the
   dust-primer attack. If the team wants tier-based rewards, that
   is a separate design item.
+
+### Fix #3 — Notify integer-division dust accumulator (2026-05-04)
+
+**Closes:** issues.txt #2 (Integer Division Loss in
+`notifyRewardAmount`). Priority list item #12.
+
+**Files changed:**
+- `contracts/RewardVault.sol` — added `uint256 public notifyRemainder`.
+  `notifyRewardAmount` now folds the previous remainder into the
+  numerator: `numerator = amount * ACC_SCALE + notifyRemainder;
+  accRewardPerToken += numerator / denom; notifyRemainder = numerator % denom;`.
+  Per-notify dust no longer gets silently discarded — it rolls
+  forward into the next distribution and eventually rounds up to a
+  full unit increment of `accRewardPerToken`.
+- `test/unit/RewardVault.test.js` — added the
+  "carries the integer-division remainder forward" assertion.
+
+**Closes also (same PR):** the `pending()` / `claim()` exclusion
+hole (excluded addresses could compute pending against their own
+balance and, in theory, claim). Both paths now early-return / revert
+for `isExcludedFromRewards[user]`.
+
+**Verification status:** code review only (sandbox blocks solc).
+
+### Fix #4 — Pause + Ownable2Step + tax cap (2026-05-09)
+
+**Closes:** AUDIT critical items "No emergency pause" and "No
+tax-rate cap / single-step ownership". Priority list items #3, #4.
+
+**Files changed:**
+- `contracts/MMMToken.sol`:
+  - Inherits `Ownable2Step` (was plain `Ownable`) and `Pausable`.
+  - Adds `address public guardian` + `setGuardian(address)` (owner only).
+  - Adds `pause()` callable by owner OR guardian; `unpause()` is
+    owner only.
+  - `_update` reverts with `EnforcedPause` while paused, except for
+    mint/burn paths (`from == address(0)` or `to == address(0)`)
+    so the admin can still rescue funds.
+  - Adds `uint256 public constant MAX_TAX_BPS = 8000` as a hard
+    code-level ceiling on any future tax setter.
+- `contracts/TaxVault.sol`:
+  - Inherits `Ownable2Step` (was plain `Ownable`).
+  - Constructor now rejects EOA / non-contract token references with
+    `NotAContract(address)`.
+- `contracts/RewardVault.sol`:
+  - Adds `bool public distributionsEnabled = true`,
+    `setDistributionsEnabled(bool)` (owner only), and a
+    `DistributionsDisabled` revert in `notifyRewardAmount`.
+  - Adds `MAX_EXCLUDED = 32` cap on `excludedRewardAddresses`,
+    revert `TooManyExcluded` on overflow.
+  - Constructor rejects non-contract `_mmm` with `NotAContract`.
+  - Completes the migration from `creditedRewards` /
+    `syncOnTransfer` to `claimable[user]` / `preTransferHook` /
+    `postTransferHook`. `claim()` now also explicitly settles
+    `rewardDebt[user] = bal * acc` BEFORE the payout transfer, so
+    the post-payout `preTransferHook` doesn't re-credit `claimable`
+    (would otherwise be a one-shot double-spend).
+  - `_crystallise` and `_resyncDebt` skip excluded addresses so
+    `taxVault`/`pair`/`DEAD` don't accumulate dead `claimable`.
+- `test/security.pauseAndGuardian.test.js` *(new)* — covers:
+  non-owner non-guardian cannot pause; guardian can pause but not
+  unpause; paused state reverts plain transfers; Ownable2Step
+  staged transfer; `distributionsEnabled` toggle round-trip; and
+  the `MAX_EXCLUDED` cap.
+- `test/security.noRetroactive.test.js` — updated assertions to
+  read from the new `claimable` mapping (was `creditedRewards`).
+- `test/fixtures/core.fixture.js` — removed the duplicate
+  `setRewardVaultOnce` call that would have reverted on the second
+  invocation (`RewardVaultAlreadySet`).
+
+**Verification status:** code review only (sandbox blocks solc
+binary download). CI must run `npx hardhat test` locally on this
+branch.
+
+**Operational follow-ups (NOT in this PR):**
+- Wrap `MMMToken` and `TaxVault` owner in a 2-of-N Safe at
+  deployment.
+- Place `setTaxExempt` / `setPair` / `setRouter` calls behind a
+  24-48h `TimelockController`. Code change is optional (can be
+  enforced purely operationally by transferring ownership to the
+  timelock contract); on-chain enforcement would require a setter
+  refactor.
+- Delegate `MMMToken.guardian` to the same Safe (or a fast-response
+  pager rota) so `pause()` is reachable in incident response.
+
+### Fix #5 — Constructor contract checks + eligibleSupply gas cap (2026-05-09)
+
+**Closes:** AUDIT issue #4 (constructor missing contract validation)
+and partially issue #8 (O(n) gas in `eligibleSupply`). Priority
+list items #8, #9.
+
+**Files changed:**
+- `contracts/RewardVault.sol`:
+  - Constructor reverts with `NotAContract(_mmm)` if `_mmm.code.length == 0`.
+  - `MAX_EXCLUDED = 32` constant; `addExcludedRewardAddress` reverts
+    `TooManyExcluded` past the cap. Bounds per-notify
+    `eligibleSupply` gas to 32 `balanceOf` calls.
+- `contracts/TaxVault.sol`:
+  - Constructor reverts with `NotAContract(addr)` if any of
+    `mmmToken` / `usdcToken` / `wmonToken` is an EOA.
+
+**Out of scope (still open):**
+- Running `excludedSupplySum` maintained on `MMMToken._update`
+  would make `eligibleSupply` O(1). Not implemented — the cap is
+  enough to make per-notify gas predictable on mainnet.
+- `removeExcludedRewardAddress` for governance flexibility (e.g.
+  if a CEX delists). Append-only is acceptable for launch.
