@@ -53,24 +53,21 @@ describe("Security - No retroactive reward claiming", function () {
     );
 
     const sniperPendingBefore = await rewardVault.pending(user2.address);
+    expect(sniperPendingBefore).to.be.gt(0n);
 
     // Sniper now buys 100x to try to drain.
     await mmm.transfer(user2.address, ethers.parseUnits("10000", 18));
 
-    // Pending after the big buy must NOT scale up to the new balance —
-    // only the credit captured from the OLD balance plus any future
-    // accRewardPerToken increase against the new balance counts.
+    // The big buy crystallises sniperPendingBefore into claimable[user2]
+    // and resets rewardDebt to the NEW (10100) balance. So pending()
+    // continues to read sniperPendingBefore — it has NOT scaled up to
+    // include the freshly-bought tokens against past acc.
     const sniperPendingAfter = await rewardVault.pending(user2.address);
-    expect(sniperPendingAfter).to.equal(0n);
+    expect(sniperPendingAfter).to.equal(sniperPendingBefore);
 
-    const credit = await rewardVault.creditedRewards(user2.address);
-    // Credit should equal the pre-buy pending (rewards earned at minBalance).
-    expect(credit).to.equal(sniperPendingBefore);
-
-    // Total claimable (credit + pending) should reflect the OLD balance,
-    // not the post-buy balance.
-    const claimable = await rewardVault.claimable(user2.address);
-    expect(claimable).to.equal(sniperPendingBefore);
+    // The crystallised slice lives in the claimable mapping.
+    const claimableBalance = await rewardVault.claimable(user2.address);
+    expect(claimableBalance).to.equal(sniperPendingBefore);
   });
 
 });

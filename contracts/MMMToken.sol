@@ -2,13 +2,16 @@
 pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 interface IRewardVaultHook {
     function syncOnTransfer(address from, address to, uint256 amount) external;
+    function preTransferHook(address from, address to) external;
+    function postTransferHook(address from, address to) external;
 }
 
-contract MMMToken is ERC20, Ownable {
+contract MMMToken is ERC20, Ownable2Step, Pausable {
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -19,12 +22,18 @@ contract MMMToken is ERC20, Ownable {
     error RewardVaultAlreadySet();
     error AlreadyLaunched();
     error TradingNotEnabled();
+    error NotGuardian();
+    error TaxBpsTooHigh(uint256 requested, uint256 cap);
 
     /*//////////////////////////////////////////////////////////////
                                 CONFIG
     //////////////////////////////////////////////////////////////*/
 
     uint256 public constant BPS = 10_000;
+    // Hard cap on any tax bracket the schedule can produce. Even owner
+    // can't raise tax above this. The launch schedule itself is
+    // immutable code, but if a future setter is added, this guards it.
+    uint256 public constant MAX_TAX_BPS = 8_000; // 80%
 
     address public taxVault;
     bool public taxVaultSetOnce;
@@ -38,6 +47,10 @@ contract MMMToken is ERC20, Ownable {
     bool public tradingEnabled;
     bool public launched;
     uint256 public launchTime;
+
+    // Guardian can pause() (one-way safety lever) but cannot unpause(),
+    // mint, set vaults, or move funds. Owner retains the unpause power.
+    address public guardian;
 
     mapping(address => bool) public isTaxExempt;
     mapping(address => uint256) public lastNonZeroAt;
@@ -53,6 +66,18 @@ contract MMMToken is ERC20, Ownable {
     event PairSet(address indexed pair);
     event RouterSet(address indexed router);
     event TaxExemptSet(address indexed who, bool exempt);
+    event GuardianSet(address indexed guardian);
+
+    /*//////////////////////////////////////////////////////////////
+                                MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
+    modifier onlyOwnerOrGuardian() {
+        if (msg.sender != owner() && msg.sender != guardian) {
+            revert NotGuardian();
+        }
+        _;
+    }
 
     /*//////////////////////////////////////////////////////////////
                                 CONSTRUCTOR
@@ -128,6 +153,29 @@ contract MMMToken is ERC20, Ownable {
         if (who == address(0)) revert ZeroAddress();
         isTaxExempt[who] = exempt;
         emit TaxExemptSet(who, exempt);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            PAUSE / GUARDIAN
+    //////////////////////////////////////////////////////////////*/
+
+    function setGuardian(address newGuardian) external onlyOwner {
+        guardian = newGuardian;
+        emit GuardianSet(newGuardian);
+    }
+
+    /// One-way safety lever for incident response. Either owner or
+    /// guardian can flip it. While paused, regular transfers revert;
+    /// mint and burn paths (from/to address(0)) are still allowed so
+    /// admin can recover stuck funds without first unpausing.
+    function pause() external onlyOwnerOrGuardian {
+        _pause();
+    }
+
+    /// Unpause is owner-only — the guardian intentionally cannot
+    /// resume trading on its own, only halt it.
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -225,6 +273,12 @@ contract MMMToken is ERC20, Ownable {
     }
 
     function _update(address from, address to, uint256 amount) internal override {
+        // Pause check: halt user-facing transfers but leave mint/burn
+        // (from/to == address(0)) live so admin can still rescue funds.
+        if (paused() && from != address(0) && to != address(0)) {
+            revert EnforcedPause();
+        }
+
         address rv = rewardVault;
         if (rv != address(0)) {
             IRewardVaultHook(rv).preTransferHook(from, to);

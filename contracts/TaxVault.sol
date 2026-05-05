@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { Ownable2Step, Ownable } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -36,7 +36,7 @@ interface IRewardVaultAdmin {
                             TAX VAULT
 //////////////////////////////////////////////////////////////*/
 
-contract TaxVault is Ownable, ReentrancyGuard {
+contract TaxVault is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -44,6 +44,7 @@ contract TaxVault is Ownable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     error ZeroAddress();
+    error NotAContract(address who);
     error NotWired();
     error RouterMissing();
     error AmountZero();
@@ -133,6 +134,12 @@ contract TaxVault is Ownable, ReentrancyGuard {
             wmonToken == address(0) ||
             initialOwner == address(0)
         ) revert ZeroAddress();
+        // Reject EOAs / non-contract addresses for the three token
+        // references — a typo would silently brick process() at runtime
+        // (the contract would deploy fine but every swap would revert).
+        if (mmmToken.code.length == 0) revert NotAContract(mmmToken);
+        if (usdcToken.code.length == 0) revert NotAContract(usdcToken);
+        if (wmonToken.code.length == 0) revert NotAContract(wmonToken);
 
         mmm = IERC20(mmmToken);
         usdc = IERC20(usdcToken);

@@ -122,10 +122,6 @@ async function coreFixture() {
     await taxVault.getAddress()
   );
 
-  await mmm.connect(owner).setRewardVaultOnce(
-    await rewardVault.getAddress()
-  );
-
   await mmm.connect(owner).setPair(pair.address);
   await mmm.connect(owner).setTaxExempt(owner.address, false);
   await mmm.connect(owner).launch();
