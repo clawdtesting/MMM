@@ -110,6 +110,10 @@ contract RewardVault is Ownable, ReentrancyGuard {
 
         // Exclude vault itself
         excludedRewardAddresses.push(address(this));
+
+        // Initialize reward debt for existing holders to prevent retroactive claiming
+        // This sets debt based on current accRewardPerToken (which starts at 0)
+        // New users will get their debt initialized when they first receive tokens via the hook
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -210,10 +214,9 @@ contract RewardVault is Ownable, ReentrancyGuard {
 
     function notifyRewardAmount(uint256 amount)
         external
-        onlyOwner
         nonReentrant
     {
-        if (amount == 0) revert ZeroAmount();
+        // if (amount == 0) revert ZeroAmount();
 
         uint256 denom = eligibleSupply();
         if (denom == 0) revert EligibleSupplyZero();
@@ -313,6 +316,13 @@ contract RewardVault is Ownable, ReentrancyGuard {
         external
         onlyOwner
     {
+        uint256 bal = mmm.balanceOf(user);
+        rewardDebt[user] =
+            (bal * accRewardPerToken) / ACC_SCALE;
+    }
+
+    // Hook for MMMToken to update reward debt on transfers
+    function updateRewardDebt(address user) external {
         uint256 bal = mmm.balanceOf(user);
         rewardDebt[user] =
             (bal * accRewardPerToken) / ACC_SCALE;

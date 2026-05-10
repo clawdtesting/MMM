@@ -219,7 +219,7 @@ contract TaxVault is Ownable, ReentrancyGuard {
         uint256 mmmAmount,
         uint256 minUsdcOut,
         uint256 deadline
-    ) external nonReentrant {
+    ) external nonReentrant onlyOwner {
         if (!processingEnabled) revert ProcessingDisabled();
         if (mmmAmount == 0) revert AmountZero();
         if (block.timestamp > deadline) revert TooSoon();

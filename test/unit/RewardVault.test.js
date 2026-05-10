@@ -2,7 +2,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
-const { deployFixture } = require("../fixtures/protocol.fixture");
+const { protocolFixture } = require("../fixtures/protocol.fixture");
 
 describe("RewardVault", function () {
   
@@ -333,7 +333,7 @@ describe("RewardVault", function () {
       
       // Should not revert with zero emission
       await expect(
-        rewardVault.notifyEmission(0)
+        rewardVault.notifyRewardAmount(0)
       ).to.not.be.reverted;
     });
 

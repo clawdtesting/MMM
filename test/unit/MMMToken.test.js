@@ -2,7 +2,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
-const { deployFixture } = require("../fixtures/protocol.fixture");
+const { protocolFixture } = require("../fixtures/protocol.fixture");
 
 describe("MMMToken", function () {
   

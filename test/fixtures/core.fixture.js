@@ -9,12 +9,10 @@ async function coreFixture() {
 
   const MMMToken = await ethers.getContractFactory("MMMToken");
 
-  const initialSupply = ethers.parseUnits("1000000", 18);
-
   const mmm = await MMMToken.deploy(
-    "Monad Money Machine",
     "MMM",
-    initialSupply,
+    "MMM",
+    ethers.parseUnits("1000000", 18), // 1 million tokens
     owner.address
   );
 
@@ -50,7 +48,6 @@ async function coreFixture() {
   await usdc.connect(owner).transferOwnership(await mockRouter.getAddress());
   await wmon.connect(owner).transferOwnership(await mockRouter.getAddress());
 
-
   /* -----------------------------------------
      4. Deploy RewardVault
   ----------------------------------------- */
@@ -76,6 +73,11 @@ async function coreFixture() {
     true
   );
 
+  // Set reward vault in token for hook
+  await mmm.connect(owner).setRewardVault(
+    await rewardVault.getAddress()
+  );
+
   /* -----------------------------------------
      5. Deploy TaxVault
   ----------------------------------------- */
@@ -96,15 +98,16 @@ async function coreFixture() {
     true
   );
 
+  /* -----------------------------------------
+     6. Transfer RewardVault ownership to TaxVault
+  ----------------------------------------- */
 
-  // Transfer RewardVault ownership to TaxVault
   await rewardVault.connect(owner).transferOwnership(
-      await taxVault.getAddress()
-    );
-  
+    await taxVault.getAddress()
+  );
 
   /* -----------------------------------------
-     6. Configure MMM for Tax
+     7. Configure MMM for Tax
   ----------------------------------------- */
 
   await mmm.connect(owner).setTaxVaultOnce(
@@ -113,21 +116,7 @@ async function coreFixture() {
 
   await mmm.connect(owner).setPair(user2.address);
   await mmm.connect(owner).setTaxExempt(owner.address, false);
-  await mmm.connect(owner).launch();
-
-  /* -----------------------------------------
-     7. Deploy SwapVault
-  ----------------------------------------- */
-
-  const SwapVault = await ethers.getContractFactory("SwapVault");
-
-  const swapVault = await SwapVault.deploy(
-    await mmm.getAddress(),
-    await wmon.getAddress(),
-    owner.address
-  );
-
-  await swapVault.waitForDeployment();
+  // Removed launch() call because token is already launched in constructor
 
   /* -----------------------------------------
      8. Deploy Marketing + Team Vaults
@@ -156,13 +145,12 @@ async function coreFixture() {
 
   await taxVault.connect(owner).wireOnce(
     await rewardVault.getAddress(),
-    await swapVault.getAddress(),
     await marketingVault.getAddress(),
     await teamVestingVault.getAddress()
   );
 
   /* -----------------------------------------
-     10. Configure Router
+    10. Configure Router
   ----------------------------------------- */
 
   await taxVault.connect(owner).setRouter(await mockRouter.getAddress());
@@ -183,7 +171,6 @@ async function coreFixture() {
     taxVault,
     marketingVault,
     teamVestingVault,
-    swapVault,
     mockRouter,
     minHoldTime,
     cooldown,
